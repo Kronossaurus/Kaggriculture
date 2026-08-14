@@ -216,3 +216,12 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Kaggriculture project
+replays/
+submission.tar.gz
+
+# Local tool/IDE state
+.idea/
+.omc/
+
