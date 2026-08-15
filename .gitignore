@@ -220,6 +220,9 @@ __marimo__/
 # Kaggriculture project
 replays/
 submission.tar.gz
+runs/
+checkpoints/*/*.zip
+analysis/
 
 # Local tool/IDE state
 .idea/

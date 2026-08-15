@@ -26,6 +26,10 @@ Kaggle API auth: the `KAGGLE_API_TOKEN` env var is expected to be set (see
   agent file, with optional replay dump for the visualizer.
 - `data/` — competition docs and downloaded assets (`README.md` rules, `AGENTS.md` workflow
   guide).
+- `checkpoints/` — versioned agent snapshots (`v0` is the frozen wheat-loop baseline, with
+  `NOTES.md` describing each version's strategy and results). RL runs save here too.
+- `rl/` — PPO training infra (Gymnasium env wrapper, observation encoder, training script).
+  Not part of the submission; see `rl/README.md` for scope and usage.
 - `replays/` — local replay JSON dumps (gitignored).
 
 ## Local testing
@@ -45,3 +49,12 @@ uv run kaggle competitions leaderboard kaggriculture -s
 ```
 
 See `data/AGENTS.md` for the full workflow (episodes, replays, logs).
+
+## RL training
+
+```bash
+uv run rl/train.py --opponent starter --timesteps 200000   # train
+uv run rl/play.py checkpoints/v2/best_model.zip             # run a saved checkpoint locally
+```
+
+See `rl/README.md` for the current action-space scope, architecture, and open questions.

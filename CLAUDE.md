@@ -25,6 +25,14 @@ uv run scripts/run_local.py --replay replays/last.json  # dump replay JSON for t
 uv run kaggle competitions submit kaggriculture -f main.py -m "message"
 uv run kaggle competitions submissions kaggriculture
 uv run kaggle competitions leaderboard kaggriculture -s
+
+uv run rl/train.py --opponent starter --timesteps 200000          # PPO training run
+uv run rl/train.py --opponent random --timesteps 20000            # quick smoke test
+uv run rl/train.py --n-envs 8 --device cuda --timesteps 2000000   # parallel envs (the real speed lever) + GPU
+uv run rl/train.py --opponent checkpoints/v2/model.zip --out checkpoints/v3  # self-play
+uv run rl/play.py checkpoints/v2/best_model.zip --opponent starter  # run a saved checkpoint locally
+uv run rl/analyze_actions.py checkpoints/v2/best_model.zip          # action-density report
+uv run python rl/test_env.py                                        # reward/decode_action regression tests
 ```
 
 `scripts/run_local.py --p1`/`--p2` accept the built-in names `random`, `pass`, `starter`, or a
@@ -42,6 +50,14 @@ correctness check for agent changes.
 - You'll see `OpenSpiel exception: Unknown game 'universal_poker'...` noise on every
   `import kaggle_environments` — it's `open_spiel` failing to register poker variants this build
   wasn't compiled with, unrelated to Kaggriculture. Harmless, safe to ignore.
+- You may also see a "Gym has been unmaintained since 2022..." deprecation warning. It's the
+  legacy `gym` package (pulled in transitively via `kaggle-environments` → `gymnax` → `gym`, not
+  something we import — everything under `rl/` uses `gymnasium`). Harmless, safe to ignore.
+- `torch` installs from a CUDA-specific index (`pytorch-cu128`), pinned via `[tool.uv.sources]` /
+  `[[tool.uv.index]]` in `pyproject.toml` with `explicit = true` — that keeps the extra index from
+  being considered for unrelated packages (adding it globally previously broke resolution for
+  `litellm`/`importlib-metadata`). If `uv sync` ever fails to resolve `torch`, check that index's
+  available versions before loosening the `torch` version constraint, not the other way around.
 
 ## Architecture
 
@@ -84,3 +100,18 @@ curves, town demand growth over the season).
 sell, repeat) — a floor to beat, not a target design. Stronger play means reasoning about land
 expansion (`BUY_LAND`), hiring farm hands, higher-value/ongoing crops and animals, and timing
 sells against the dynamic market rather than dumping produce immediately.
+
+### RL training (`rl/`)
+
+Separate track from `main.py`, not shipped to Kaggle. `rl/env.py` wraps `kaggle_environments`'
+own `env.train([None, opponent])` trainer as a Gymnasium `Env` — but computes its own per-turn
+money-diff reward rather than trusting the trainer's: Kaggriculture's interpreter only writes
+`state.reward` on the terminal step, so the trainer's "per-step diff" is silently zero for
+719/720 turns (confirmed root cause of `checkpoints/v1` collapsing to a do-nothing policy — see
+`rl/README.md`). `rl/features.py` encodes observations into a `Dict` space (`own_grid`/`opp_grid`
+per-tile channels + a flat `vector`); `rl/train.py` runs PPO (`stable-baselines3`) against a
+configurable opponent (built-in name, agent `.py`, or another checkpoint for self-play). The
+policy currently only controls farmer movement/tile ops — market orders, land, hands, and
+animals are auto-scripted or unavailable. See `rl/README.md` for the exact scope, the reward-bug
+writeup, and its Open questions section for what's unresolved (notably: no export path yet from
+an SB3 checkpoint to a submittable `main.py`).

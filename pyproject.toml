@@ -4,6 +4,20 @@ version = "0.1.0"
 description = "Add your description here"
 requires-python = ">=3.12"
 dependencies = [
+    "gymnasium>=1.2.0",
     "kaggle>=2.2.4",
     "kaggle-environments>=1.32.6",
+    "stable-baselines3>=2.9.0",
+    "tensorboard>=2.21.0",
+    "torch>=2.8",
 ]
+
+# CUDA build of torch, scoped to just this package (explicit=true keeps this
+# index out of resolution for everything else -- see rl/README.md for why).
+[tool.uv.sources]
+torch = [{ index = "pytorch-cu128" }]
+
+[[tool.uv.index]]
+name = "pytorch-cu128"
+url = "https://download.pytorch.org/whl/cu128"
+explicit = true
