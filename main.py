@@ -5,7 +5,7 @@ per turn for whichever player index we've been assigned. Keep this file
 self-contained (or bundle extra modules into a tar.gz with this at the root
 per AGENTS.md) since it's shipped standalone to the competition runner.
 
-Strategy (v1 -- "farm maxxer"): a scripted multi-unit farm loop built on top
+Strategy ("farm maxxer"): a scripted multi-unit farm loop built on top
 of `reference/melon_maxxer.py` (Kaggle's own official example agent, see its
 docstring), fixing its four documented weaknesses:
 
@@ -32,11 +32,19 @@ docstring), fixing its four documented weaknesses:
     the cap when the shed is close to overflowing (losing produce to a full
     shed is strictly worse than a bad sale price).
 
-Still out of scope, same as melon_maxxer: animals (coops/pastures) and any
-opponent modeling -- this agent only ever reacts to its own farm/market
-state. See rl/README.md for the parallel (currently stalled) attempt at a
-learned policy, and the "Remaining natural next steps" there for what a v2
-of this scripted agent could add.
+Animal support (GOOSE/COW/SHEEP) was implemented and A/B tested
+(`reference/main_with_animals_v1.py`) and found to be a clear net negative --
+roughly a 70% cut to final money vs. this animal-free version, deterministic
+A/B vs. `starter` across 3 seeds -- even after fixing four real bugs along
+the way. The daily per-animal upkeep (FEED/CARE/COLLECT_FERTILIZER) competes
+for the same scarce farmer/hand turns as the much higher value/tile/day crop
+loop, and a single missed feeding cycle loses an entire $300-500 purchase
+outright. See that file's docstring for the full writeup before attempting
+this again.
+
+Still out of scope: any opponent modeling -- this agent only ever reacts to
+its own farm/market state. See rl/README.md for the parallel (currently
+stalled) attempt at a learned policy.
 
 **Endgame liquidation**: unsold shed contents (and anything still sitting in
 a farmer/hand's personal inventory) don't count towards the final score --
