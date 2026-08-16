@@ -111,7 +111,8 @@ money-diff reward rather than trusting the trainer's: Kaggriculture's interprete
 `rl/README.md`). `rl/features.py` encodes observations into a `Dict` space (`own_grid`/`opp_grid`
 per-tile channels + a flat `vector`); `rl/train.py` runs PPO (`stable-baselines3`) against a
 configurable opponent (built-in name, agent `.py`, or another checkpoint for self-play). The
-policy currently only controls farmer movement/tile ops — market orders, land, hands, and
-animals are auto-scripted or unavailable. See `rl/README.md` for the exact scope, the reward-bug
+policy controls farmer movement/tile ops plus buying (seeds, fertilizer, land) and selling as
+independent per-turn choices — hands and animals are still unavailable. See `rl/README.md` for
+the exact scope, the reward-bug
 writeup, and its Open questions section for what's unresolved (notably: no export path yet from
 an SB3 checkpoint to a submittable `main.py`).

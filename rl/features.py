@@ -26,13 +26,26 @@ BASE_PRICE = {
 SEED_COST = {"WHEAT": 10, "CARROT": 20, "TOMATO": 50, "STRAWBERRY": 100, "MELON": 80}
 MARKET_I0 = 10_000  # starting inventory every product is calibrated against
 
+# The four tiles PICKUP/DROP require standing on -- confirmed in kaggriculture.py:
+# _shed_access_tiles() -> [(half-1,half-1), (half,half-1), (half-1,half), (half,half)]
+# for half = board_size // 2, and both ops silently no-op via _is_shed_adjacent()
+# before doing anything else if the farmer isn't on one of them. Nothing in the
+# observation flagged this before noop_audit.py found PICKUP/DROP failing ~100% of
+# the time in practice -- see rl/README.md.
+SHED_ADJACENT_TILES = {
+    (BOARD_SIZE // 2 - 1, BOARD_SIZE // 2 - 1), (BOARD_SIZE // 2, BOARD_SIZE // 2 - 1),
+    (BOARD_SIZE // 2 - 1, BOARD_SIZE // 2), (BOARD_SIZE // 2, BOARD_SIZE // 2),
+}
+
 # Per-tile channels: locked, empty, weed, is_plant, crop one-hot (5), watered_today,
 # yield_units (normalized), fertilized, farmer-is-here.
 # v1 has no BUILD_COOP/BUILD_PASTURE/PLACE ops, so animal structures never appear on
 # a farm we control and get no dedicated channel yet -- see rl/README.md.
 GRID_CHANNELS = 4 + len(CROPS) + 4
 
-VECTOR_DIM = 6 + len(CROPS) + len(PRODUCTS) * 3
+# 6 scalars + 1 (near-shed flag) + seed counts + PRODUCTS x{shed, held-in-inventory,
+# market price, market inventory} -- see _encode_vector.
+VECTOR_DIM = 7 + len(CROPS) + len(PRODUCTS) * 4
 
 
 def _encode_farm_grid(farm) -> np.ndarray:
@@ -76,11 +89,22 @@ def _encode_vector(obs) -> np.ndarray:
         obs["hour"] / 24.0,
         len(me.get("unlocked_quadrants", [])) / 4.0,
         len(obs["town"].get("unlocked_shops", [])) / 8.0,
+        1.0 if tuple(me["farmer"]) in SHED_ADJACENT_TILES else 0.0,
     ]
     seeds = private["seeds"]
     parts.extend(seeds.get(c, 0) / 10.0 for c in CROPS)
     shed = private["shed"]
     parts.extend(shed.get(p, 0) / 50.0 for p in PRODUCTS)
+    # HARVEST lands produce in the acting unit's personal inventory, not the shed --
+    # it only moves to the shed (and becomes sellable) at end-of-day (see rl/env.py's
+    # _potential docstring). Without this, the policy can't see what it just
+    # harvested until that transfer happens, up to turnsPerDay-1 turns later.
+    inventories = private.get("inventories", [])
+    inv_totals: dict[str, int] = {}
+    for inv in inventories:
+        for item, count in inv.items():
+            inv_totals[item] = inv_totals.get(item, 0) + count
+    parts.extend(inv_totals.get(p, 0) / 50.0 for p in PRODUCTS)
     prices = market["prices"]
     parts.extend(prices.get(p, BASE_PRICE[p]) / BASE_PRICE[p] for p in PRODUCTS)
     inventory = market["inventory"]

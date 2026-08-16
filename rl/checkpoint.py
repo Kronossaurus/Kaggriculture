@@ -33,16 +33,38 @@ def resolve_opponent(spec: str) -> str:
     raise FileNotFoundError(f"Opponent agent not found: {spec}")
 
 
-def load_agent(path: str | Path) -> Callable[[dict], dict]:
+def resolve_agent(spec: str, deterministic: bool = True):
+    """Resolve an --opponent/agent CLI spec into whatever kaggle_environments'
+    env.run()/env.train() accepts: a built-in name as-is, an SB3 checkpoint .zip
+    (loaded via load_agent), or an agent .py path (resolve_opponent's cwd-then-
+    repo-root rule). Shared by train.py (self-play opponents) and
+    noop_audit.py (both the audited agent and its opponent) -- unlike
+    resolve_opponent, this one also handles the .zip case, since both of those
+    callers need to point either side at a trained checkpoint, not just a
+    scripted/built-in opponent."""
+    if spec in {"random", "pass", "starter"}:
+        return spec
+    path = Path(spec)
+    if not path.is_absolute():
+        path = REPO_ROOT / spec
+    if path.suffix == ".zip":
+        return load_agent(path, deterministic=deterministic)
+    return resolve_opponent(spec)  # .py agent: cwd then repo root
+
+
+def load_agent(path: str | Path, deterministic: bool = True) -> Callable[[dict], dict]:
     """Load a PPO checkpoint and wrap it as an agent function.
 
-    `deterministic=True` (argmax over the policy's action distribution) since
-    this is for evaluation/opponent play, not exploration.
+    `deterministic=True` (argmax over the policy's action distribution) by
+    default since this is normally for evaluation/opponent play, not
+    exploration -- pass `deterministic=False` to sample instead (e.g.
+    rl/noop_audit.py's --stochastic, to audit the same distribution
+    rl/analyze_actions.py's --stochastic reports on).
     """
     model = PPO.load(path)
 
     def agent(obs) -> dict:
-        action, _ = model.predict(encode_obs(obs), deterministic=True)
+        action, _ = model.predict(encode_obs(obs), deterministic=deterministic)
         return decode_action(action, obs)
 
     return agent

@@ -30,6 +30,9 @@ Kaggle API auth: the `KAGGLE_API_TOKEN` env var is expected to be set (see
   `NOTES.md` describing each version's strategy and results). RL runs save here too.
 - `rl/` — PPO training infra (Gymnasium env wrapper, observation encoder, training script).
   Not part of the submission; see `rl/README.md` for scope and usage.
+- `reference/` — third-party agents/notebooks downloaded for comparison (e.g.
+  `melon_maxxer.py`, from Kaggle's official getting-started notebook), usable as an
+  `--opponent`/`--p1`/`--p2` like any other agent file.
 - `replays/` — local replay JSON dumps (gitignored).
 
 ## Local testing

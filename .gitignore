@@ -222,6 +222,7 @@ replays/
 submission.tar.gz
 runs/
 checkpoints/*/*.zip
+checkpoints/*/*.pkl
 analysis/
 
 # Local tool/IDE state

@@ -1,7 +1,8 @@
 """Analyze the "density" of a trained RL checkpoint's choices: which discrete ops
-(rl/env.py's FARMER_OPS) it picks, how it uses the independent BUY_SEED choice
-alongside them, how diverse that mix is, when in the season it picks them, and
-where on the grid it's standing when it does.
+(rl/env.py's FARMER_OPS) it picks, how it uses the four independent market-order
+choices (BUY_SEED, BUY_PRODUCT, BUY_LAND, SELL) alongside them, how diverse that
+mix is, when in the season it picks them, and where on the grid it's standing
+when it does.
 
 Motivated by the checkpoints/v1 collapse documented in rl/README.md ("policy
 converged to spamming a single movement op for the entire episode") -- this is
@@ -15,18 +16,37 @@ Usage:
     uv run rl/analyze_actions.py checkpoints/v1/best_model.zip --out analysis/v1_vs_starter
 
 Writes to --out (default `analysis/<checkpoint stem>`):
-    action_distribution.png    -- bar chart of farmer-op counts/percentages
-    buy_seed_distribution.png  -- bar chart of BUY_SEED choice counts/percentages
-    position_heatmap.png       -- 10x10 spatial density of where the farmer stood
-                                   when each choice was made
-    action_over_time.png       -- stacked area of farmer-op mix per in-game day
-    log.csv                    -- raw per-turn log (episode, turn, day, hour,
-                                   farmer op, buy-seed choice, x, y)
+    action_distribution.png       -- bar chart of farmer-op counts/percentages
+    buy_seed_distribution.png     -- bar chart of BUY_SEED choice counts/percentages
+    buy_product_distribution.png  -- bar chart of BUY_PRODUCT choice counts/percentages
+    buy_land_distribution.png     -- bar chart of BUY_LAND choice counts/percentages
+    sell_distribution.png         -- bar chart of SELL choice counts/percentages
+    position_heatmap.png          -- 10x10 spatial density of where the farmer stood
+                                      when each choice was made
+    action_over_time.png          -- stacked area of farmer-op mix per in-game day
+    log.csv                       -- raw per-turn log (episode, turn, day, hour,
+                                      farmer op, all four market choices, x, y)
 
-and prints a console summary including Shannon entropy of the action
+and prints a console summary including win/loss/tie record and mean own-vs-
+opponent money (only meaningful when compared against another run with the same
+--seed/--opponent -- see collect()'s docstring), Shannon entropy of the action
 distribution (a single "how diverse are the choices" number: 0 = always the same
-op, 1 = every op picked equally often) and the longest run of identical
+op, 1 = every op picked equally often), and the longest run of identical
 consecutive actions, which is what a collapsed policy looks like.
+
+--seed defaults to a fixed value (0), not random, and win/loss is judged by
+final money relative to the *same-episode* opponent, not an absolute number --
+per data/README.md, town shops unlock on a random per-episode draw, which
+dominates variance in absolute final money across different draws, so an
+absolute score (or even a win rate) is only comparable against another run that
+used the same seed and opponent. This mirrors a documented self-play failure
+mode worth knowing about even though this project isn't doing self-play yet
+(rl/train.py's default --opponent is "starter", not a checkpoint): in a shared
+market, both copies of a self-play pair can raise their *absolute* score by
+cutting production (less supply -> both relieve their own price pressure)
+while one of them is actually losing the ladder -- rank self-play checkpoints
+by win rate, and treat "the opponent's absolute score also went up" as a
+warning sign, not a good sign, if that's ever tried here.
 """
 
 from __future__ import annotations
@@ -50,22 +70,39 @@ import numpy as np  # noqa: E402
 from stable_baselines3 import PPO  # noqa: E402
 
 from rl.checkpoint import resolve_opponent  # noqa: E402
-from rl.env import BUY_SEED_OPS, FARMER_OPS, KaggricultureEnv  # noqa: E402
+from rl.env import BUY_LAND_OPS, BUY_PRODUCT_OPS, BUY_SEED_OPS, FARMER_OPS, SELL_OPS, KaggricultureEnv  # noqa: E402
 
 TURNS_PER_DAY = 24
+
+# The four independent market-order choices alongside the farmer op -- see
+# rl/env.py's module docstring. (row index into `collect()`'s tuples, ops list,
+# file-name-safe slug, human label).
+SECONDARY_DIMS = [
+    (5, BUY_SEED_OPS, "buy_seed", "BUY_SEED"),
+    (6, BUY_PRODUCT_OPS, "buy_product", "BUY_PRODUCT"),
+    (7, BUY_LAND_OPS, "buy_land", "BUY_LAND"),
+    (8, SELL_OPS, "sell", "SELL"),
+]
 
 
 def collect(model, opponent, episodes: int, episode_steps: int, seed: int | None, deterministic: bool):
     """Step `episodes` full episodes, recording every (turn, day, hour, farmer op,
-    buy-seed choice, farmer x/y) -- the two choices are independent per turn, see
-    rl/env.py's module docstring.
+    the four market choices, farmer x/y) -- all five choices are independent per
+    turn, see rl/env.py's module docstring.
 
-    Returns the raw per-turn rows plus a 10x10 [y, x] visit-count grid.
+    Returns the raw per-turn rows, a 10x10 [y, x] visit-count grid, and a list of
+    (own_final_money, opponent_final_money) pairs -- one per episode, for the
+    win/loss/tie summary in main(). Absolute money isn't comparable across
+    *different* seeds/episodes (data/README.md: town shops unlock on a random
+    per-episode draw, so total demand -- and therefore attainable money -- varies
+    a lot run to run); within one episode both players face the same draw, so the
+    relative comparison is the only one that means anything here.
     """
     env = KaggricultureEnv(opponent=opponent, episode_steps=episode_steps, seed=seed)
-    # episode, turn, day, hour, farmer_action, buy_action, x, y
-    rows: list[tuple[int, int, int, int, int, int, int, int]] = []
+    # episode, turn, day, hour, farmer, buy_seed, buy_product, buy_land, sell, x, y
+    rows: list[tuple[int, ...]] = []
     position_counts = np.zeros((10, 10), dtype=np.int64)  # [y, x]
+    outcomes: list[tuple[float, float]] = []  # (own_final_money, opponent_final_money)
 
     for ep in range(episodes):
         ep_seed = None if seed is None else seed + ep
@@ -74,21 +111,25 @@ def collect(model, opponent, episodes: int, episode_steps: int, seed: int | None
         turn = 0
         while not done:
             action, _ = model.predict(obs, deterministic=deterministic)
-            farmer_action, buy_action = (int(v) for v in action)
+            farmer, buy_seed, buy_product, buy_land, sell = (int(v) for v in action)
 
             fy, fx = (int(v) for v in np.argwhere(obs["own_grid"][12] == 1.0)[0])
             position_counts[fy, fx] += 1
             day, hour = divmod(turn, TURNS_PER_DAY)
-            rows.append((ep, turn, day, hour, farmer_action, buy_action, fx, fy))
+            rows.append((ep, turn, day, hour, farmer, buy_seed, buy_product, buy_land, sell, fx, fy))
 
             obs, _reward, terminated, truncated, _info = env.step(action)
             done = terminated or truncated
             turn += 1
 
         money = obs["vector"][0] * 1000.0
-        print(f"  episode {ep + 1}/{episodes} done ({turn} turns, final money ~{money:.0f})")
+        opp_money = obs["vector"][1] * 1000.0
+        outcomes.append((money, opp_money))
+        outcome = "WIN" if money > opp_money else "LOSS" if money < opp_money else "TIE"
+        print(f"  episode {ep + 1}/{episodes} done ({turn} turns, "
+              f"own ~{money:.0f} vs opponent ~{opp_money:.0f} -- {outcome})")
 
-    return rows, position_counts
+    return rows, position_counts, outcomes
 
 
 def longest_streak(actions: list[int]) -> tuple[int, str]:
@@ -118,13 +159,12 @@ def shannon_entropy(counts: Counter, n_classes: int) -> tuple[float, float]:
     return bits, (bits / max_bits if max_bits > 0 else 0.0)
 
 
-def plot_action_distribution(counts: Counter, total: int, out_path: Path) -> None:
-    ops = FARMER_OPS
+def plot_choice_distribution(counts: Counter, ops: list[str], total: int, title: str, color: str, out_path: Path) -> None:
     values = [counts.get(i, 0) for i in range(len(ops))]
-    fig, ax = plt.subplots(figsize=(10, 5))
-    bars = ax.bar(ops, values, color="#4C72B0")
+    fig, ax = plt.subplots(figsize=(max(6, len(ops)), 5))
+    bars = ax.bar(ops, values, color=color)
     ax.set_ylabel("count")
-    ax.set_title("Action distribution (density of choices)")
+    ax.set_title(title)
     ax.set_xticks(range(len(ops)))
     ax.set_xticklabels(ops, rotation=45, ha="right")
     for bar, v in zip(bars, values):
@@ -148,11 +188,12 @@ def plot_position_heatmap(position_counts: np.ndarray, out_path: Path) -> None:
     plt.close(fig)
 
 
-def plot_action_over_time(rows: list[tuple[int, int, int, int, int, int, int, int]], out_path: Path) -> None:
+def plot_action_over_time(rows: list[tuple[int, ...]], out_path: Path) -> None:
     max_day = max((r[2] for r in rows), default=0)
     n_ops = len(FARMER_OPS)
     per_day = np.zeros((n_ops, max_day + 1), dtype=np.float64)
-    for _ep, _turn, day, _hour, farmer_action, _buy_action, _x, _y in rows:
+    for r in rows:
+        day, farmer_action = r[2], r[4]
         per_day[farmer_action, day] += 1
     totals = per_day.sum(axis=0)
     totals[totals == 0] = 1  # avoid div-by-zero on days with no data
@@ -172,32 +213,28 @@ def plot_action_over_time(rows: list[tuple[int, int, int, int, int, int, int, in
     plt.close(fig)
 
 
-def plot_buy_seed_distribution(counts: Counter, total: int, out_path: Path) -> None:
-    ops = BUY_SEED_OPS
-    values = [counts.get(i, 0) for i in range(len(ops))]
-    fig, ax = plt.subplots(figsize=(6, 5))
-    bars = ax.bar(ops, values, color="#DD8452")
-    ax.set_ylabel("count")
-    ax.set_title("BUY_SEED choice distribution")
-    ax.set_xticks(range(len(ops)))
-    ax.set_xticklabels(ops, rotation=45, ha="right")
-    for bar, v in zip(bars, values):
-        pct = 100 * v / total if total else 0
-        ax.annotate(f"{pct:.1f}%", (bar.get_x() + bar.get_width() / 2, bar.get_height()),
-                    ha="center", va="bottom", fontsize=8)
-    fig.tight_layout()
-    fig.savefig(out_path, dpi=150)
-    plt.close(fig)
-
-
-def write_csv(rows: list[tuple[int, int, int, int, int, int, int, int]], out_path: Path) -> None:
+def write_csv(rows: list[tuple[int, ...]], out_path: Path) -> None:
     with out_path.open("w", newline="") as f:
         writer = csv.writer(f)
-        writer.writerow(["episode", "turn", "day", "hour", "farmer_action_idx", "farmer_action",
-                          "buy_seed_idx", "buy_seed", "farmer_x", "farmer_y"])
-        for ep, turn, day, hour, farmer_action, buy_action, x, y in rows:
-            writer.writerow([ep, turn, day, hour, farmer_action, FARMER_OPS[farmer_action],
-                              buy_action, BUY_SEED_OPS[buy_action], x, y])
+        writer.writerow([
+            "episode", "turn", "day", "hour",
+            "farmer_action_idx", "farmer_action",
+            "buy_seed_idx", "buy_seed",
+            "buy_product_idx", "buy_product",
+            "buy_land_idx", "buy_land",
+            "sell_idx", "sell",
+            "farmer_x", "farmer_y",
+        ])
+        for ep, turn, day, hour, farmer, buy_seed, buy_product, buy_land, sell, x, y in rows:
+            writer.writerow([
+                ep, turn, day, hour,
+                farmer, FARMER_OPS[farmer],
+                buy_seed, BUY_SEED_OPS[buy_seed],
+                buy_product, BUY_PRODUCT_OPS[buy_product],
+                buy_land, BUY_LAND_OPS[buy_land],
+                sell, SELL_OPS[sell],
+                x, y,
+            ])
 
 
 def main() -> None:
@@ -206,7 +243,13 @@ def main() -> None:
     parser.add_argument("--opponent", default="starter", help="random|pass|starter or a main.py-style agent file")
     parser.add_argument("--episodes", type=int, default=3)
     parser.add_argument("--steps", type=int, default=720, help="Episode length (episode_steps)")
-    parser.add_argument("--seed", type=int, default=None)
+    parser.add_argument("--seed", type=int, default=0,
+                         help="Fixed by default (not random): town shops unlock on a random "
+                              "per-episode draw (data/README.md), which dominates variance in "
+                              "absolute final money across *different* seeds/runs -- comparing "
+                              "two checkpoints only means something if they faced the same draw. "
+                              "Pass a different value to sample a different (but still fixed, "
+                              "still comparable across a --episodes>1 sweep) draw.")
     parser.add_argument("--stochastic", action="store_true",
                          help="Sample from the policy's action distribution instead of argmax "
                               "(default is deterministic, matching rl/checkpoint.py's eval convention)")
@@ -223,9 +266,21 @@ def main() -> None:
 
     print(f"Running {args.episodes} episode(s) vs {args.opponent} "
           f"({'stochastic' if args.stochastic else 'deterministic'} policy) ...")
-    rows, position_counts = collect(
+    rows, position_counts, outcomes = collect(
         model, opponent, args.episodes, args.steps, args.seed, deterministic=not args.stochastic
     )
+
+    wins = sum(1 for own, opp in outcomes if own > opp)
+    losses = sum(1 for own, opp in outcomes if own < opp)
+    ties = len(outcomes) - wins - losses
+    mean_own = sum(own for own, _ in outcomes) / len(outcomes)
+    mean_opp = sum(opp for _, opp in outcomes) / len(outcomes)
+    print(f"\n=== Match outcome ({len(outcomes)} episode(s), seed={args.seed}) ===")
+    print(f"  W/L/T: {wins}/{losses}/{ties}  ({100 * wins / len(outcomes):.0f}% win rate)")
+    print(f"  mean own money: {mean_own:.0f}   mean opponent money: {mean_opp:.0f}")
+    print("  NOTE: only compare this win rate / these means against another run using the same "
+          "--seed and --opponent -- the town-shop draw varies the total money available per "
+          "episode enough to dominate the comparison otherwise (see collect()'s docstring).")
 
     actions = [r[4] for r in rows]
     counts = Counter(actions)
@@ -242,17 +297,20 @@ def main() -> None:
     print(f"Longest identical-action streak: {streak_len} turns of {streak_op!r}"
           + (" -- looks collapsed" if streak_len > total * 0.5 else ""))
 
-    buy_actions = [r[5] for r in rows]
-    buy_counts = Counter(buy_actions)
-    print("\n=== BUY_SEED choice (independent of the farmer op -- see rl/env.py) ===")
-    for i, op in enumerate(BUY_SEED_OPS):
-        c = buy_counts.get(i, 0)
-        print(f"  {op:<16} {c:>6}  ({100 * c / total:5.1f}%)")
-
-    plot_action_distribution(counts, total, out_dir / "action_distribution.png")
-    plot_buy_seed_distribution(buy_counts, total, out_dir / "buy_seed_distribution.png")
+    plot_choice_distribution(counts, FARMER_OPS, total, "Action distribution (density of choices)",
+                              "#4C72B0", out_dir / "action_distribution.png")
     plot_position_heatmap(position_counts, out_dir / "position_heatmap.png")
     plot_action_over_time(rows, out_dir / "action_over_time.png")
+
+    for row_idx, ops, slug, label in SECONDARY_DIMS:
+        dim_counts = Counter(r[row_idx] for r in rows)
+        print(f"\n=== {label} choice (independent of the farmer op -- see rl/env.py) ===")
+        for i, op in enumerate(ops):
+            c = dim_counts.get(i, 0)
+            print(f"  {op:<16} {c:>6}  ({100 * c / total:5.1f}%)")
+        plot_choice_distribution(dim_counts, ops, total, f"{label} choice distribution",
+                                  "#DD8452", out_dir / f"{slug}_distribution.png")
+
     write_csv(rows, out_dir / "log.csv")
 
     print(f"\nWrote plots and log.csv to {out_dir}/")
