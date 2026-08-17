@@ -18,6 +18,16 @@ Every function tested here caused a real bug this session hit once already
     This locks the dump-in-full behavior so it can't quietly regress back.
   - `_CropPlanner.choose`: the crop-mix balancing logic multiple other
     functions (planting, seed-buying) depend on being correct.
+  - `_build_land_orders`: a replay showed this agent buying all 4
+    quadrants by day 11 while plateauing at ~40-48% of tiles actually
+    planted for the rest of the season -- land purchases now gate on
+    utilization of what's already owned (see main.py's docstring's Land
+    utilization gate note).
+  - `_is_fertilizable` / `_last_yield_day`: TOMATO/STRAWBERRY's
+    `max_yield_day` is just a placeholder equal to `first_yield_day`, not
+    "last production day" -- using it directly would only ever fertilize
+    the first of four scheduled productions (see main.py's docstring's
+    TOMATO/STRAWBERRY note).
 """
 
 from __future__ import annotations
@@ -74,6 +84,17 @@ def test_is_harvestable_false_when_yield_units_zero():
     assert not main._is_harvestable(empty, day=20)  # long past first_yield_day, nothing to harvest though
 
 
+def test_is_fertilizable_covers_full_ongoing_crop_schedule():
+    """TOMATO's max_yield_day (8) is just a placeholder equal to
+    first_yield_day (kaggriculture.py's CROPS table) -- not "last
+    production day". Its real schedule runs ages 8/9/10/11 (interval 1,
+    max_yield 4), so fertilizing must stay eligible through age 11, not
+    cut off after the first scheduled production."""
+    tile = _tile(crop="TOMATO", planted_day=0, fertilized_until_day=-1)
+    assert main._is_fertilizable(tile, day=11)  # last scheduled production
+    assert not main._is_fertilizable(tile, day=12)  # past the last production
+
+
 def test_decide_unit_digs_a_weed_instead_of_stalling():
     """Without DIG, a WEED tile is permanently lost -- PLANT/WATER/SELL all
     no-op on it (kaggriculture.py), so it must be the top priority action
@@ -113,12 +134,59 @@ def test_build_sell_orders_holds_below_threshold():
     assert orders == []
 
 
+def test_build_land_orders_blocked_below_utilization_gate():
+    """See module docstring's Land utilization gate note: a replay showed
+    this agent buying its 4th quadrant by day 11 while plateauing at
+    ~40-48% tiles planted for the rest of the season -- don't buy the next
+    quadrant until most of what's already owned is being used."""
+    tiles = {(0, 0): _tile(), (1, 0): _tile()}  # 2 of 9 tiles planted (22%)
+    farm = _farm(tiles)
+    farm["money"] = 5000.0
+    orders = main._build_land_orders(farm, days_remaining=20)
+    assert orders == []
+
+
+def test_build_land_orders_buys_once_utilization_gate_is_met():
+    tiles = {(x, y): _tile() for x in range(3) for y in range(2)}  # 6 of 9 planted (67%)
+    farm = _farm(tiles)
+    farm["money"] = 5000.0
+    orders = main._build_land_orders(farm, days_remaining=20)
+    assert orders == [["BUY_LAND"]]
+
+
 def test_crop_planner_balances_toward_target_share():
-    """MELON's target share (0.5) is furthest from 0 among an empty farm, so
-    an equal seed budget should be spent on MELON first."""
+    """MELON's target share (0.45) is furthest from 0 among an empty farm
+    (WHEAT 0.25, CARROT 0.15), so an equal seed budget should be spent on
+    MELON first."""
     farm = _farm({})
     private = {"seeds": {"MELON": 5, "WHEAT": 5, "CARROT": 5}}
     planner = main._CropPlanner(private, farm, days_remaining=20)
+    assert planner.choose() == "MELON"
+
+
+def test_crop_planner_avoids_depressed_price_crop():
+    """The bug a replay caught: MELON's price crashes hard on a big sell
+    dump (its above-equilibrium shape is quadratic, data/README.md's Price
+    Function) and only recovers ~1 unit/day (no town shop demands MELON --
+    see data/README.md's Town Buildings table). Replanting MELON at its
+    full 45% target share while the price is still below what we'd sell it
+    for just re-floods a market we already flooded -- the planner should
+    route the seed budget to wheat/carrot instead while that holds."""
+    farm = _farm({})
+    private = {"seeds": {"MELON": 5, "WHEAT": 5, "CARROT": 5}}
+    prices = {"MELON": 50, "WHEAT": 25, "CARROT": 35}  # melon well below 0.65 * base(250)
+    planner = main._CropPlanner(private, farm, days_remaining=20, prices=prices)
+    assert planner.choose() in ("WHEAT", "CARROT")
+
+
+def test_crop_planner_falls_back_when_every_price_is_depressed():
+    """Land should never sit idle just because the whole market dipped at
+    once -- fall back to plain share-balancing (MELON, same as the
+    no-price-data case) rather than returning None."""
+    farm = _farm({})
+    private = {"seeds": {"MELON": 5, "WHEAT": 5, "CARROT": 5}}
+    prices = {"MELON": 1, "WHEAT": 1, "CARROT": 1}
+    planner = main._CropPlanner(private, farm, days_remaining=20, prices=prices)
     assert planner.choose() == "MELON"
 
 

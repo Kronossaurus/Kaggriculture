@@ -52,6 +52,105 @@ loop, and a single missed feeding cycle loses an entire $300-500 purchase
 outright. See that file's docstring for the full writeup before attempting
 this again.
 
+**Tried a second time, still reverted**: `reference/x492_nah_i_d_win.py`
+(see `scripts/pool_winrate.py`) runs animals profitably by never deciding
+about them live at all -- their placement/feed/harvest schedule is baked
+into a precomputed action tape offline, with no runtime turn-contention
+risk. Adapting that idea to this agent's reactive architecture, 2 of
+`MAX_HANDS`'s 6 hands were carved out as permanently dedicated animal
+hands, never touching a crop tile, specifically to remove the turn-
+contention failure mode above. It didn't help. A replay first caught a
+second, unrelated starvation cause even with dedicated hands: WHEAT is
+both a sellable crop and animal feed, and `_build_sell_orders` dumps the
+entire shed the moment its price clears threshold, so the shed sat at 0
+WHEAT for turns at a stretch -- fixed by buying feed WHEAT directly from
+the market, decoupled from the crop side. With that fixed too (animals no
+longer mass-starved), a 10-seed pool comparison was still a severe net
+loss across the board -- e.g. -66% mean money vs `random`, -62% vs
+`melon_maxxer` (which flipped from a 10/10-seed win to 6/10), -60% vs
+`starter` (9/10). The root cause was never actually "contention" or
+"starvation logistics" -- it's that 2 of 6 hands (a third of the crew) is
+too much crop-tending capacity to give up for what animals produce in a
+30-day season, at this agent's crop economics. Don't retry without first
+finding a much cheaper way to fund animal upkeep than a fixed hand tax.
+
+**Price-aware planting**: MELON's price curve is punished quadratically for
+oversupply above equilibrium (`data/README.md`'s Price Function, the `sq`
+above-target shape -- the steepest in the whole table) and only recovers
+~1 unit/day: no town shop demands MELON, only the flat town-center trickle
+(`data/README.md`'s Town Buildings table). A replay showed `_CropPlanner`
+kept spending its 50% target share on MELON turn after turn right after a
+big sell dump had just crashed its price (250 -> 86 base over one season,
+seed 1 vs `starter`) -- replanting straight back into a market it had just
+flooded. `_CropPlanner.choose` now skips a crop from consideration while
+its current price is below the same threshold `_build_sell_orders` already
+uses to decide whether to sell it, falling back to ignoring price only if
+every plantable crop is currently depressed (so land never sits idle over
+a temporary dip).
+
+**Land utilization gate**: `_build_land_orders` used to buy the next
+quadrant purely on cash available, with no regard for whether the land
+already owned was even being worked. A replay showed this agent buying its
+4th quadrant (all 100 tiles) by day 11 while plateauing at ~40-48% of
+tiles actually planted for the rest of the season.
+`reference/x492_nah_i_d_win.py` (the strongest agent in the pool, see
+`scripts/pool_winrate.py`) never buys that 4th quadrant at all -- it stops
+at 3 (75 tiles) and holds ~70-73% utilization there instead, ending the
+same paired-seed season with far more money. `_build_land_orders` now
+gates each new `BUY_LAND` on the current quadrant(s) already being at
+least `LAND_UTILIZATION_GATE` planted -- buying land faster than it can be
+staffed just leaves it idle. **A companion fix was tried and reverted**:
+`MAX_HANDS = 6` (a self-imposed number, not a game rule -- hiring is
+nearly free, fib-cost/day per `data/README.md`'s Hiring section) looked
+like the reason utilization plateaued, and x492 itself runs up to 12
+hands, so `MAX_HANDS` was raised to 12 with hires scaled to match.
+Measured instead, 10-seed pool comparison: the land gate alone was a clean
+win against every pool opponent (e.g. +21% mean money vs `random`, +41% vs
+x492), while adding the raised hand cap on top made it *worse* than the
+gate alone almost everywhere (still better than doing nothing, just a
+smaller gain) -- more hands means more simultaneous harvests dumped into
+the same finite-demand market, which crashes prices faster than the extra
+fib-scaling hire cost pays back. `MAX_HANDS` and the hire formula are back
+to their original values; only the land gate stuck.
+
+**TOMATO/STRAWBERRY**: this agent only ever grew the three one-time crops
+(MELON/WHEAT/CARROT). `data/README.md`'s Harvest Yields section documents
+two more, TOMATO and STRAWBERRY, as *ongoing* crops -- once planted they
+keep producing on a fixed schedule (tomato at ages 8/9/10/11, strawberry at
+10/12/14/16) without needing to be replanted between harvests, unlike a
+one-time crop's single payout. `_is_harvestable`/`_decide_unit`'s generic
+PLANT-tile field checks (`yield_units`, `watered_today`) already handle
+this correctly with no changes -- the engine keeps the tile alive after
+HARVEST for an ongoing crop instead of clearing it, and just keeps refilling
+`yield_units` on schedule, so a unit that waters an ongoing-crop tile daily
+and harvests whenever `yield_units > 0` was already the right behavior.
+Both are now in `CASH_CROPS`/`SELL_PARAMS`/`SEED_RESERVE`. **Measured, not
+assumed, how much of MELON's share to give them**: the obvious-looking move
+was cutting MELON's dominant 0.5 share hard to make room (it's the crop
+whose price crashes quadratically, per the Price-aware planting note
+above) -- 10-seed pool comparison showed that alone (MELON 0.35, no
+tomato/strawberry, redistributed to WHEAT/CARROT) was a *clean loss*
+against every pool opponent, including x492. MELON's price gate already
+protects it from replanting into a crashed market, so de-emphasizing it
+further just traded away its far-higher base price ($250 vs WHEAT's $25)
+for nothing. What actually pays off is adding TOMATO/STRAWBERRY as a small
+addition without touching MELON much: `CROP_TARGET_SHARE` settled at
+MELON 0.45 / WHEAT 0.25 / CARROT 0.15 / TOMATO 0.10 / STRAWBERRY 0.05 --
+roughly flat (+/-2%) against every weaker pool opponent and +33% mean
+money against x492 (their gentler above-equilibrium price curves, `sqrt`/
+`linear` vs MELON's `sq`, pay off specifically when the market is
+contested). Fertilizing them was initially left out: `_is_fertilizable`'s
+eligibility window used `CROPS[crop]["max_yield_day"]` as an upper bound,
+which for these two crops equals `first_yield_day` (a placeholder value,
+not "last production day"), so reusing it as-is would only ever allow
+fertilizing the *first* scheduled production and silently miss the rest.
+Fixed with `_last_yield_day`, an ongoing-crop-aware bound
+(`first_yield_day + (max_yield - 1) * interval`, matching the real
+schedule -- tomato through age 11, strawberry through age 16); both are
+now in `FERTILIZE_CROPS` too. 10-seed pool comparison: a clean win
+everywhere, +2 to +7% mean money with no regressions (largest gain against
+x492, +7%, where every bit of yield matters most).
+
 Still out of scope: any opponent modeling -- this agent only ever reacts to
 its own farm/market state. See rl/README.md for the parallel (currently
 stalled) attempt at a learned policy.
@@ -82,20 +181,22 @@ from kaggle_environments.envs.kaggriculture.kaggriculture import (
 # Tuning constants
 # ---------------------------------------------------------------------------
 
-CASH_CROPS = ("MELON", "WHEAT", "CARROT")
-CROP_TARGET_SHARE = {"MELON": 0.5, "WHEAT": 0.3, "CARROT": 0.2}
-FERTILIZE_CROPS = {"WHEAT", "CARROT"}
+CASH_CROPS = ("MELON", "WHEAT", "CARROT", "TOMATO", "STRAWBERRY")
+CROP_TARGET_SHARE = {"MELON": 0.45, "WHEAT": 0.25, "CARROT": 0.15, "TOMATO": 0.10, "STRAWBERRY": 0.05}
+FERTILIZE_CROPS = {"WHEAT", "CARROT", "TOMATO", "STRAWBERRY"}
 
-SEED_RESERVE = {"MELON": 3, "WHEAT": 3, "CARROT": 3}
+SEED_RESERVE = {"MELON": 3, "WHEAT": 3, "CARROT": 3, "TOMATO": 2, "STRAWBERRY": 2}
 FERTILIZER_RESERVE = 2
 FERTILIZER_MAX_PRICE_FRAC = 1.2  # don't buy fertilizer more than 20% over base
 
 SELL_PARAMS = {
     # threshold: fraction of base price required to sell at all -- see
     # _build_sell_orders for why there's no per-turn cap.
-    "MELON":  {"threshold": 0.65},
-    "WHEAT":  {"threshold": 0.45},
-    "CARROT": {"threshold": 0.45},
+    "MELON":      {"threshold": 0.65},
+    "WHEAT":      {"threshold": 0.45},
+    "CARROT":     {"threshold": 0.45},
+    "TOMATO":     {"threshold": 0.50},
+    "STRAWBERRY": {"threshold": 0.55},
 }
 
 SHED_CAPACITY = 100  # data/README.md default; not exposed in `obs`
@@ -109,6 +210,9 @@ DEFAULT_EPISODE_STEPS = 720  # data/README.md defaults, used if `config` is unav
 DEFAULT_TURNS_PER_DAY = 24
 SEED_BUFFER_DAYS = 1  # a crop needs first_yield_day + this many days left to be worth planting
 LAND_CUTOFF_DAYS = 5  # stop buying new land this close to the end, it won't pay back in time
+LAND_UTILIZATION_GATE = 0.6  # don't buy the next quadrant until this much of what we
+                              # already own is planted -- see the module docstring's
+                              # Land utilization gate note
 ENDGAME_LIQUIDATION_DAYS = 2  # ignore the sell-price threshold this close to the end
 
 
@@ -137,26 +241,40 @@ def _shed_adjacent_tiles(board_size):
     return {(half - 1, half - 1), (half, half - 1), (half - 1, half), (half, half)}
 
 
-def _is_fertilizable(tile, day):
-    return (
-        isinstance(tile, dict)
-        and tile.get("kind") == "PLANT"
-        and tile["crop"] in FERTILIZE_CROPS
-        and tile["fertilized_until_day"] < day
-        and day - tile["planted_day"] <= CROPS[tile["crop"]]["max_yield_day"]
-    )
-
-
-def _any_fertilizable(farm, day):
-    return any(_is_fertilizable(tile, day) for row in farm["tiles"] for tile in row)
-
-
 def _is_plant(tile):
     return isinstance(tile, dict) and tile.get("kind") == "PLANT"
 
 
 def _is_weed(tile):
     return isinstance(tile, dict) and tile.get("kind") == "WEED"
+
+
+def _last_yield_day(crop):
+    """The last day a crop can still produce, i.e. the true upper bound for
+    _is_fertilizable -- CROPS[crop]["max_yield_day"] is only that for
+    one-time crops. For an *ongoing* crop (TOMATO/STRAWBERRY) it's just a
+    placeholder equal to first_yield_day (data/README.md's Harvest Yields
+    section): the real schedule runs first_yield_day, +interval, +interval,
+    ... for max_yield productions total (tomato ages 8/9/10/11, strawberry
+    10/12/14/16), so the placeholder alone would only ever allow
+    fertilizing the first of the four."""
+    data = CROPS[crop]
+    if data["ongoing"]:
+        return data["first_yield_day"] + (data["max_yield"] - 1) * data["interval"]
+    return data["max_yield_day"]
+
+
+def _is_fertilizable(tile, day):
+    return (
+        _is_plant(tile)
+        and tile["crop"] in FERTILIZE_CROPS
+        and tile["fertilized_until_day"] < day
+        and day - tile["planted_day"] <= _last_yield_day(tile["crop"])
+    )
+
+
+def _any_fertilizable(farm, day):
+    return any(_is_fertilizable(tile, day) for row in farm["tiles"] for tile in row)
 
 
 def _is_harvestable(tile, day):
@@ -181,8 +299,9 @@ class _CropPlanner:
     `private["seeds"]`, never seeds bought this same turn.
     """
 
-    def __init__(self, private, farm, days_remaining):
+    def __init__(self, private, farm, days_remaining, prices=None):
         self.seed_budget = dict(private.get("seeds", {}))
+        self.prices = prices or {}
         # A crop that can't reach first_yield_day (+ a day of slack to sell it
         # after) before the season ends is a pure loss to plant -- see the
         # module docstring's Endgame liquidation note.
@@ -199,12 +318,27 @@ class _CropPlanner:
     def has_plantable(self):
         return any(self.seed_budget.get(c, 0) > 0 for c in self.plantable_crops)
 
+    def _price_ok(self, crop):
+        """Would we currently be willing to *sell* this crop? If not (and we
+        have price data at all), planting more of it just grows tomorrow's
+        shed pile in a market that's already below what we're willing to
+        accept -- see the module docstring's Price-aware planting note."""
+        price = self.prices.get(crop)
+        if price is None:
+            return True
+        base = MARKET_PARAMS[crop]["base"]
+        return price >= base * SELL_PARAMS[crop]["threshold"]
+
     def choose(self):
-        """Pick whichever affordable crop is furthest below its target mix share."""
+        """Pick whichever affordable, currently-worth-selling crop is
+        furthest below its target mix share. Falls back to ignoring price
+        if every plantable crop is currently depressed, so land never sits
+        idle over a temporary dip."""
         available = [c for c in self.plantable_crops if self.seed_budget.get(c, 0) > 0]
         if not available:
             return None
-        crop = min(available, key=lambda c: self.counts[c] / self.total - CROP_TARGET_SHARE[c])
+        pool = [c for c in available if self._price_ok(c)] or available
+        crop = min(pool, key=lambda c: self.counts[c] / self.total - CROP_TARGET_SHARE[c])
         self.seed_budget[crop] -= 1
         self.counts[crop] += 1
         self.total += 1
@@ -329,6 +463,10 @@ def _build_land_orders(farm, days_remaining):
     n_extra = len(farm["unlocked_quadrants"]) - 1  # NW is always owned
     if n_extra >= len(LAND_ORDER):
         return []
+    unlocked = [tile for row in farm["tiles"] for tile in row if tile != "LOCKED"]
+    planted = sum(1 for tile in unlocked if _is_plant(tile))
+    if unlocked and planted / len(unlocked) < LAND_UTILIZATION_GATE:
+        return []  # can't staff what we already own -- more land would just sit idle
     if farm["money"] - SAFETY_RESERVE >= LAND_PRICES[n_extra]:
         return [["BUY_LAND"]]
     return []
@@ -396,7 +534,7 @@ def agent(obs, config=None):
     inventories = private.get("inventories", [{}])
 
     want_fertilizer = _any_fertilizable(farm, day)
-    planner = _CropPlanner(private, farm, days_remaining)
+    planner = _CropPlanner(private, farm, days_remaining, market_prices)
 
     claimed = set()
     units = [farm["farmer"]] + list(farm["hands"])

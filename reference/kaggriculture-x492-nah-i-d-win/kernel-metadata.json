@@ -1,0 +1,21 @@
+{
+  "id": "stevenleehans/kaggriculture-x492-nah-i-d-win",
+  "id_no": 131013797,
+  "title": "Kaggriculture X492 - Nah, I'd Win.",
+  "code_file": "kaggriculture-x492-nah-i-d-win.ipynb",
+  "language": "python",
+  "kernel_type": "notebook",
+  "is_private": false,
+  "enable_gpu": false,
+  "enable_tpu": false,
+  "enable_internet": false,
+  "keywords": [],
+  "dataset_sources": [],
+  "kernel_sources": [],
+  "competition_sources": [
+    "kaggriculture"
+  ],
+  "model_sources": [],
+  "docker_image": "gcr.io/kaggle-images/python@sha256:dafd4ce5668bbf1ad422e4c109e0f18c9623c3a7c7f48b0235f13142755c40b9",
+  "machine_shape": "None"
+}

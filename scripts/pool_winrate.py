@@ -7,11 +7,12 @@ this is the missing piece.
 
 Default pool is every lightweight, dependency-free opponent currently
 available: the two `kaggle_environments` built-ins worth testing against
-(`random`, `starter`) plus the two scripted reference agents in this repo
-(`checkpoints/v0/main.py`, the original one-tile wheat loop; and
-`reference/melon_maxxer.py`, Kaggle's own official single-crop example). No
-RL checkpoint is included -- see rl/README.md, none survive the current
-action space.
+(`random`, `starter`) plus the scripted reference agents in this repo
+(`checkpoints/v0/main.py`, the original one-tile wheat loop;
+`reference/melon_maxxer.py`, Kaggle's own official single-crop example; and
+`reference/x492_nah_i_d_win.py`, a strong external agent pulled from Kaggle
+Kernels for comparison only -- not ours, never submit it). No RL checkpoint
+is included -- see rl/README.md, none survive the current action space.
 
 Usage:
     uv run scripts/pool_winrate.py                              # main.py vs the default pool, 20 seeds each
@@ -32,7 +33,13 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(SCRIPT_DIR))
 from run_local import resolve_agent  # noqa: E402
 
-DEFAULT_POOL = ["random", "starter", "checkpoints/v0/main.py", "reference/melon_maxxer.py"]
+DEFAULT_POOL = [
+    "random",
+    "starter",
+    "checkpoints/v0/main.py",
+    "reference/melon_maxxer.py",
+    "reference/x492_nah_i_d_win.py",
+]
 
 
 def play(agent_path: str, opponent_path: str, seed: int, steps: int) -> tuple[float, float]:
