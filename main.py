@@ -7,7 +7,8 @@ per AGENTS.md) since it's shipped standalone to the competition runner.
 
 Strategy ("farm maxxer"): a scripted multi-unit farm loop built on top
 of `reference/melon_maxxer.py` (Kaggle's own official example agent, see its
-docstring), fixing its four documented weaknesses:
+docstring), fixing three of its four documented weaknesses (see the
+Correction note below for the fourth):
 
   - melon_maxxer never expands land or hires hands -> this agent buys land
     greedily and hires hands every day (hiring is *extremely* cheap: fib(n)
@@ -24,13 +25,22 @@ docstring), fixing its four documented weaknesses:
     fertilized cap, per data/README.md's Harvest Yields section -- melon's
     cap is reachable by watering alone, fertilizer there only shortens the
     growth window, so it's skipped as lower value for the added complexity).
-  - melon_maxxer dumps its entire shed in a single SELL order once a
-    threshold is crossed, which can crash the price mid-sale (price moves
-    unit-by-unit *within* an order, see data/README.md's Market Mechanics)
-    -> this agent caps how much of each crop it sells per turn, spreading
-    a big harvest over several turns instead of one dump, and only lifts
-    the cap when the shed is close to overflowing (losing produce to a full
-    shed is strictly worse than a bad sale price).
+
+**Correction -- the fourth "fix" (throttled selling) was reverted, it was a
+regression**: melon_maxxer dumps its entire shed in one SELL order once a
+threshold is crossed, which can crash the price mid-sale (price moves
+unit-by-unit *within* an order, see data/README.md's Market Mechanics). An
+earlier version of this agent capped how much of each crop it sold per turn
+to avoid that, on paper a strict improvement. Measured instead: a deterministic
+20-seed head-to-head between that version and an ablation that dumps
+everything (`reference/main_dump_sell.py`) was a 19/20-seed *loss* for the
+capped version. Root cause: holding harvested value in the shed waiting for
+the cap to free up slows reinvestment into land/seeds/hands more than the
+occasional price dip from a big dump costs, at this agent's actual
+production scale -- the theoretical concern was real but small relative to
+the throttling's own opportunity cost. `_build_sell_orders` now dumps in
+full again, like melon_maxxer, with the shed-overflow-guard threshold-bypass
+(`SHED_OVERFLOW_GUARD`) kept since that part was never in question.
 
 Animal support (GOOSE/COW/SHEEP) was implemented and A/B tested
 (`reference/main_with_animals_v1.py`) and found to be a clear net negative --
@@ -81,12 +91,11 @@ FERTILIZER_RESERVE = 2
 FERTILIZER_MAX_PRICE_FRAC = 1.2  # don't buy fertilizer more than 20% over base
 
 SELL_PARAMS = {
-    # threshold: fraction of base price required to sell at all.
-    # cap: max units of this crop sold per turn (spreads a big harvest out
-    # instead of dumping it in one order -- see module docstring).
-    "MELON":  {"threshold": 0.65, "cap": 6},
-    "WHEAT":  {"threshold": 0.45, "cap": 20},
-    "CARROT": {"threshold": 0.45, "cap": 15},
+    # threshold: fraction of base price required to sell at all -- see
+    # _build_sell_orders for why there's no per-turn cap.
+    "MELON":  {"threshold": 0.65},
+    "WHEAT":  {"threshold": 0.45},
+    "CARROT": {"threshold": 0.45},
 }
 
 SHED_CAPACITY = 100  # data/README.md default; not exposed in `obs`
@@ -280,11 +289,21 @@ def _decide_unit(pos, inv, farm, private, day, board_size, claimed, planner, she
 
 
 def _build_sell_orders(shed, prices, days_remaining):
+    """Dumps the entire shed stock of a crop in one order once its price
+    threshold is met -- same behavior as melon_maxxer, deliberately reverted
+    from an earlier version that capped units sold per turn (see the module
+    docstring's Correction note). A per-turn cap was tried expecting it to
+    avoid crashing the price via a big single-order dump; instead it was a
+    measured net negative (a 19/20-seed head-to-head loss to this dump
+    version, `reference/main_dump_sell.py`): holding harvested value in the
+    shed waiting for the cap to free up slows reinvestment into land/seeds/
+    hands more than an occasional price dip costs, at this agent's actual
+    production scale.
+    """
     orders = []
     shed_total = sum(shed.values())
     crowded = shed_total >= SHED_CAPACITY * SHED_OVERFLOW_GUARD
     liquidating = days_remaining <= ENDGAME_LIQUIDATION_DAYS
-    dump_uncapped = crowded or days_remaining <= 0  # no more turns left to protect the price
     for crop, params in SELL_PARAMS.items():
         qty = shed.get(crop, 0)
         if qty <= 0:
@@ -292,8 +311,7 @@ def _build_sell_orders(shed, prices, days_remaining):
         base = MARKET_PARAMS[crop]["base"]
         price = prices.get(crop, base)
         if crowded or liquidating or price >= base * params["threshold"]:
-            cap = qty if dump_uncapped else params["cap"]
-            orders.append(["SELL", crop, min(qty, cap)])
+            orders.append(["SELL", crop, qty])
     return orders
 
 
