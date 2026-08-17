@@ -25,6 +25,10 @@ explicit = true
 [tool.ruff]
 line-length = 120
 target-version = "py312"
+# External kernels pulled in for pool comparison (reference/*, see their own
+# docstrings) are kept byte-identical to the source notebook -- not written
+# to our style and not ours to reformat -- so they're excluded from lint.
+extend-exclude = ["reference/x492_nah_i_d_win.py"]
 
 [tool.ruff.lint]
 # Default select (E4, E7, E9, F) plus E402: several scripts under rl/ deliberately
