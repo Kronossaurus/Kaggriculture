@@ -227,6 +227,21 @@ Prints total wasted (silently no-op) actions and a per-op breakdown sorted by
 waste -- the breakdown is what points at *which* rule the policy hasn't
 learned, not just that something's off.
 
+## Checkpoint files deleted (history below kept for the lessons)
+
+Every checkpoint directory under `checkpoints/` except `v0` (not RL -- the
+scripted wheat-loop reference agent, `main.py`'s v0 predecessor) has been
+deleted: `v1`, `v2`, and every `v2_*_snapshot` variant. None were loadable
+against the current `rl/env.py` action space (the `MultiDiscrete` shape
+changed twice -- `Discrete`→`MultiDiscrete`, then 14→16 farmer ops -- each a
+documented breaking change below), so none were resumable or playable
+checkpoints, only historical artifacts. The write-up of what each run found
+is kept as-is below since the lessons (reward bug, Phi floor-fix, idle/
+neglect penalties, shed-adjacency gap, etc.) remain the reason `rl/env.py`
+looks the way it does -- only the multi-megabyte `.zip` weights were removed.
+A fresh training run under the current action space is required before this
+track has anything loadable again.
+
 ## v1 checkpoint status: collapsed, invalidated by the reward bug above
 
 The first real `checkpoints/v1` training run (200k timesteps vs `starter`) converged to a
