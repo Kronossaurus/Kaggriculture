@@ -21,3 +21,19 @@ torch = [{ index = "pytorch-cu128" }]
 name = "pytorch-cu128"
 url = "https://download.pytorch.org/whl/cu128"
 explicit = true
+
+[tool.ruff]
+line-length = 120
+target-version = "py312"
+
+[tool.ruff.lint]
+# Default select (E4, E7, E9, F) plus E402: several scripts under rl/ deliberately
+# import after a sys.path.insert() (to import repo-root modules from scripts/rl
+# subdirs) and already mark those with `# noqa: E402` -- E402 needs to be enabled
+# for those to mean anything, otherwise ruff itself flags them as unused noqa.
+extend-select = ["E402"]
+
+[dependency-groups]
+dev = [
+    "ruff>=0.16.3",
+]

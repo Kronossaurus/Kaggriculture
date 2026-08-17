@@ -119,7 +119,8 @@ scale, revisit if BUY_LAND turns out to never get explored.
 
 from __future__ import annotations
 
-from typing import Any, Callable, Union
+from collections.abc import Callable
+from typing import Any, ClassVar
 
 import gymnasium as gym
 import numpy as np
@@ -143,7 +144,7 @@ SELL_OPS = ["NONE", *PRODUCTS]
 
 # A built-in name ("random"/"pass"/"starter"), a path to an agent .py file, or a
 # callable obs -> action dict (e.g. a wrapped SB3 checkpoint for self-play).
-OpponentSpec = Union[str, Callable[[dict], dict]]
+OpponentSpec = str | Callable[[dict], dict]
 
 
 def decode_action(action, obs) -> dict:
@@ -182,7 +183,7 @@ class KaggricultureEnv(gym.Env):
     `opponent` (an `OpponentSpec`, see above) drives player 1.
     """
 
-    metadata: dict[str, Any] = {"render_modes": []}
+    metadata: ClassVar[dict[str, Any]] = {"render_modes": []}
 
     # Must match PPO's `gamma` in rl/train.py (SB3 default 0.99) for the potential-based
     # shaping below to keep its policy-invariance guarantee -- see step().

@@ -7,8 +7,8 @@ Shared by rl/train.py (self-play opponents) and rl/play.py (local evaluation).
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from pathlib import Path
-from typing import Callable
 
 from stable_baselines3 import PPO
 

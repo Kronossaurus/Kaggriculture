@@ -23,6 +23,7 @@ uv run scripts/run_local.py --seed 42                # deterministic episode
 uv run scripts/run_local.py --replay replays/last.json  # dump replay JSON for the visualizer
 uv run scripts/pool_winrate.py                          # main.py win rate vs a field of opponents, not just one
 uv run python test_main.py                               # main.py regression tests (real bugs this session hit)
+uv run ruff check .                                      # lint suite
 
 uv run kaggle competitions submit kaggriculture -f main.py -m "message"
 uv run kaggle competitions submissions kaggriculture
@@ -40,9 +41,11 @@ uv run python rl/test_env.py                                        # reward/dec
 `scripts/run_local.py --p1`/`--p2` accept the built-in names `random`, `pass`, `starter`, or a
 path to an agent `.py` file (resolved relative to cwd, then repo root — works from any directory).
 
-There is no lint suite yet; `run_local.py` against `random`/`starter`, `pool_winrate.py` for
-win rate against a field, and `test_main.py`'s regression tests (`uv run python test_main.py`)
-are the current correctness checks for agent changes.
+`uv run ruff check .` is the lint suite (config in `pyproject.toml`'s `[tool.ruff]`; default
+rule set plus E402, since several `rl/` scripts deliberately import after a `sys.path.insert()`
+and mark it `# noqa: E402` — E402 has to be enabled for those to mean anything). For agent
+correctness, there's no assertion-based suite beyond `test_main.py`; `run_local.py` against
+`random`/`starter` and `pool_winrate.py` for win rate against a field are the main checks.
 
 ### Environment
 
