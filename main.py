@@ -151,6 +151,14 @@ def _any_fertilizable(farm, day):
     return any(_is_fertilizable(tile, day) for row in farm["tiles"] for tile in row)
 
 
+def _is_plant(tile):
+    return isinstance(tile, dict) and tile.get("kind") == "PLANT"
+
+
+def _is_weed(tile):
+    return isinstance(tile, dict) and tile.get("kind") == "WEED"
+
+
 def _is_harvestable(tile, day):
     """yield_units > 0 alone is NOT "ready" for one-time crops: `_new_plant`
     seeds it at 1 immediately on planting (kaggriculture.py), but HARVEST is
@@ -184,7 +192,7 @@ class _CropPlanner:
         self.counts = {c: 0 for c in CASH_CROPS}
         for row in farm["tiles"]:
             for tile in row:
-                if isinstance(tile, dict) and tile.get("kind") == "PLANT" and tile["crop"] in CASH_CROPS:
+                if _is_plant(tile) and tile["crop"] in CASH_CROPS:
                     self.counts[tile["crop"]] += 1
         self.total = sum(self.counts.values()) or 1
 
@@ -220,14 +228,14 @@ def _find_target(pos, farm, day, board_size, claimed, inv, planner, shed_tiles, 
             if (x, y) in claimed:
                 continue
             tile = farm["tiles"][y][x]
-            if isinstance(tile, dict) and tile.get("kind") == "PLANT":
+            if _is_plant(tile):
                 if _is_harvestable(tile, day):
                     candidates.append((x, y, 0))  # harvest
                 elif not tile["watered_today"]:
                     candidates.append((x, y, water_priority))
                 elif inv.get("FERTILIZER", 0) > 0 and _is_fertilizable(tile, day):
                     candidates.append((x, y, 3))  # deliver fertilizer
-            elif isinstance(tile, dict) and tile.get("kind") == "WEED":
+            elif _is_weed(tile):
                 candidates.append((x, y, 2))  # clear a weed to reclaim the tile
             elif tile is None and planner.has_plantable():
                 candidates.append((x, y, 4))  # plant
@@ -249,7 +257,7 @@ def _decide_unit(pos, inv, farm, private, day, board_size, claimed, planner, she
     fx, fy = pos
     tile = farm["tiles"][fy][fx]
 
-    if isinstance(tile, dict) and tile.get("kind") == "PLANT":
+    if _is_plant(tile):
         if _is_harvestable(tile, day):
             claimed.add((fx, fy))
             return ["HARVEST"]
@@ -260,7 +268,7 @@ def _decide_unit(pos, inv, farm, private, day, board_size, claimed, planner, she
             claimed.add((fx, fy))
             return ["FERTILIZE"]
 
-    if isinstance(tile, dict) and tile.get("kind") == "WEED":
+    if _is_weed(tile):
         claimed.add((fx, fy))
         return ["DIG"]
 

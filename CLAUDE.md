@@ -21,6 +21,8 @@ uv run scripts/run_local.py --p2 starter --steps 200 # main.py vs the official b
 uv run scripts/run_local.py --p1 random --p2 random  # baseline vs baseline
 uv run scripts/run_local.py --seed 42                # deterministic episode
 uv run scripts/run_local.py --replay replays/last.json  # dump replay JSON for the visualizer
+uv run scripts/pool_winrate.py                          # main.py win rate vs a field of opponents, not just one
+uv run python test_main.py                               # main.py regression tests (real bugs this session hit)
 
 uv run kaggle competitions submit kaggriculture -f main.py -m "message"
 uv run kaggle competitions submissions kaggriculture
@@ -38,8 +40,9 @@ uv run python rl/test_env.py                                        # reward/dec
 `scripts/run_local.py --p1`/`--p2` accept the built-in names `random`, `pass`, `starter`, or a
 path to an agent `.py` file (resolved relative to cwd, then repo root — works from any directory).
 
-There is no lint/test suite yet; `run_local.py` against `random`/`starter` is the current
-correctness check for agent changes.
+There is no lint suite yet; `run_local.py` against `random`/`starter`, `pool_winrate.py` for
+win rate against a field, and `test_main.py`'s regression tests (`uv run python test_main.py`)
+are the current correctness checks for agent changes.
 
 ### Environment
 
