@@ -657,6 +657,33 @@ any comparison a real decision rests on. Running pool comparisons one at
 a time rather than concurrently with other heavy background work is
 still good hygiene, but per the 50-episode-vs-10-episode finding above,
 isolation alone isn't a full guarantee.
+
+**Top-ladder WHEAT price range checked, didn't translate into a win**:
+asked whether top-ladder replays (`replays/top_ladder/`, 5 games) avoid
+the round trip above some other way. They don't -- they do it constantly
+(71-248 buy orders and 38-199 sell orders per game per player) and it's
+net *profitable* for them (WHEAT nets +9% to +88% of final money for 9 of
+10 player-games analyzed), which on its own says the round trip isn't
+inherently a losing pattern. The mechanistic difference: every observed
+buy across all 5 replays landed at 1.00x-2.08x base, every observed sell
+at 1.08x-2.08x -- both far tighter than this agent's 0.45x sell threshold
+and 5.0x feed-buy cap. Ran `scripts/mc_search.py --params
+WHEAT_SELL_THRESHOLD FEED_MAX_PRICE_FRAC` (30 trials, scoped to just the
+`main_fertilizer_selling_submitted_20260817.py` matchup to avoid x492's
+unwinnable-regardless-of-tuning result flooring every win rate) to look
+for a better pair within that observed range. Two candidates hit a
+misleadingly perfect win_rate=1.00 at the search's own 5-seed sample
+(threshold=1.242/feed=2.62 and threshold=1.545/feed=3.19) -- but neither
+held up at 30 seeds, the same lesson as the note above: 25/30 (83.3%)
+baseline vs 19/30 (63.3%) for the first candidate (a real regression) and
+24/30 (80.0%, statistically a wash) for the second. Left both constants
+unchanged. One genuinely useful, robust finding did survive the noise,
+though: every trial with `FEED_MAX_PRICE_FRAC` below ~1.4 scored
+win_rate=0.00 with a catastrophic margin (down to -$91,579) -- a feed cap
+that tight can't clear the price often enough to actually feed animals,
+losing them outright. `FEED_MAX_PRICE_FRAC`'s current 5.0 has plenty of
+headroom above that failure zone, so no change needed there either, but
+it's worth remembering as a hard floor if this constant is ever revisited.
 """
 
 from __future__ import annotations

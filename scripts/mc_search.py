@@ -25,10 +25,11 @@ decisions well. This script only tunes the numeric constants layered on
 top of that heuristic, offline, between games.
 
 Usage:
-    uv run scripts/mc_search.py                       # 30 trials, 5 seeds/opponent
+    uv run scripts/mc_search.py                       # 30 trials, 5 seeds/opponent, all params
     uv run scripts/mc_search.py --trials 50 --seeds 8
     uv run scripts/mc_search.py --pool reference/x492_nah_i_d_win.py
     uv run scripts/mc_search.py --rng-seed 1           # reproduce a previous search
+    uv run scripts/mc_search.py --params WHEAT_SELL_THRESHOLD FEED_MAX_PRICE_FRAC
 """
 
 from __future__ import annotations
@@ -60,34 +61,54 @@ DEFAULT_SEARCH_POOL = [
 TRIAL_DIR = REPO_ROOT / "analysis" / "mc_search_trials"  # analysis/ is gitignored
 RESULTS_PATH = REPO_ROOT / "analysis" / "mc_search_results.jsonl"
 
-# name -> ("int" | "float", low, high). Kept intentionally small (5 params):
-# this project's own history (dedicated-hand allocation, animal structure
+# name -> ("int" | "float", low, high). Kept intentionally small: this
+# project's own history (dedicated-hand allocation, animal structure
 # buffer) shows more knobs doesn't reliably mean a better search, just a
-# slower one. Animal-related constants are deliberately left out until the
-# token-stranding bug (see main.py's `_build_animal_orders` docstring) is
-# actually resolved -- tuning around a known-buggy subsystem risks the
-# search "fixing" the bug's symptom via unrelated constants.
+# slower one. Animal-*ownership* constants are deliberately left out until
+# the token-stranding bug (see main.py's `_build_animal_orders` docstring)
+# is actually resolved -- tuning around a known-buggy subsystem risks the
+# search "fixing" the bug's symptom via unrelated constants. WHEAT_SELL_
+# THRESHOLD/FEED_MAX_PRICE_FRAC are feed-*pricing* knobs, not ownership,
+# so they're fair game -- see main.py's Sell/rebuy round-trip docstring
+# note: top-ladder replays never buy WHEAT above ~2.1x base or sell below
+# ~1.1x, both far tighter than this agent's current 5.0x / 0.45x.
 PARAM_SPACE = {
     "HANDS_BASE": ("int", 1, 6),
     "HANDS_PER_QUADRANT": ("int", 1, 5),
     "MAX_HANDS": ("int", 8, 16),
     "LAND_UTILIZATION_GATE": ("float", 0.35, 0.65),
     "PRICE_ATTRACTIVENESS_WEIGHT": ("float", 0.0, 0.3),
+    "WHEAT_SELL_THRESHOLD": ("float", 0.45, 2.0),
+    "FEED_MAX_PRICE_FRAC": ("float", 1.0, 5.0),
+}
+
+# WHEAT_SELL_THRESHOLD isn't a top-level `NAME = value` constant -- it's
+# nested in SELL_PARAMS["WHEAT"]["threshold"]. Patched with its own regex
+# instead of forcing every constant through the generic top-level pattern.
+_CUSTOM_PATCH_PATTERNS = {
+    "WHEAT_SELL_THRESHOLD": re.compile(r'("WHEAT":\s*\{"threshold":\s*)[^}]+(\})'),
 }
 
 
-def sample_params(rng: random.Random) -> dict[str, float | int]:
+def sample_params(rng: random.Random, active: dict) -> dict[str, float | int]:
     params: dict[str, float | int] = {}
-    for name, (kind, low, high) in PARAM_SPACE.items():
+    for name, (kind, low, high) in active.items():
         params[name] = rng.randint(low, high) if kind == "int" else round(rng.uniform(low, high), 3)
     # A cap below the base hire count is nonsensical -- clamp instead of
     # discarding the whole sample, cheaper than rejection sampling.
-    params["MAX_HANDS"] = max(params["MAX_HANDS"], params["HANDS_BASE"])
+    if "MAX_HANDS" in params and "HANDS_BASE" in params:
+        params["MAX_HANDS"] = max(params["MAX_HANDS"], params["HANDS_BASE"])
     return params
 
 
 def patch_source(src: str, params: dict[str, float | int]) -> str:
     for name, value in params.items():
+        if name in _CUSTOM_PATCH_PATTERNS:
+            pattern = _CUSTOM_PATCH_PATTERNS[name]
+            if not pattern.search(src):
+                raise ValueError(f"pattern for {name!r} not found in main.py -- did it get restructured?")
+            src = pattern.sub(rf"\g<1>{value}\g<2>", src, count=1)
+            continue
         pattern = re.compile(rf"^{name} = [^#\n]+", re.MULTILINE)
         if not pattern.search(src):
             raise ValueError(f"constant {name!r} not found in main.py -- did it get renamed?")
@@ -131,19 +152,25 @@ def main() -> None:
         help=f"Opponents for the search phase (default: {' '.join(DEFAULT_SEARCH_POOL)})",
     )
     parser.add_argument("--rng-seed", type=int, default=0, help="Seed for the search's own sampling (default: 0)")
+    parser.add_argument(
+        "--params", nargs="+", default=None, choices=list(PARAM_SPACE),
+        help="Subset of PARAM_SPACE to vary (default: all of it)",
+    )
     args = parser.parse_args()
 
     base_path = resolve_agent(args.base)
     base_src = Path(base_path).read_text(encoding="utf-8")
     pool = [resolve_agent(spec) for spec in args.pool]
     rng = random.Random(args.rng_seed)
+    active = {k: PARAM_SPACE[k] for k in (args.params or PARAM_SPACE)}
 
-    print(f"=== MC search: {args.trials} trials, {args.seeds} seeds x {len(pool)} opponents each ===\n")
+    print(f"=== MC search: {args.trials} trials, {args.seeds} seeds x {len(pool)} opponents each, "
+          f"varying {list(active)} ===\n")
     RESULTS_PATH.parent.mkdir(parents=True, exist_ok=True)
     results = []
     with RESULTS_PATH.open("w", encoding="utf-8") as out:
         for trial_id in range(1, args.trials + 1):
-            params = sample_params(rng)
+            params = sample_params(rng, active)
             trial_path = make_trial_agent(base_src, params, trial_id)
             score = evaluate(str(trial_path), pool, args.seeds, args.steps)
             row = {"trial": trial_id, "params": params, **score}
@@ -160,9 +187,12 @@ def main() -> None:
     for row in results[:5]:
         print(f"win_rate={row['win_rate']:.2f}  margin=${row['mean_margin']:>9,.0f}  {row['params']}")
     print(
-        "\nThese are search-phase results (small pool, few seeds) -- confirm the "
-        "winner with a full `uv run scripts/pool_winrate.py` before keeping it, "
-        "same gate as every other change in this project."
+        "\nThese are search-phase results (small pool, few seeds) -- do NOT trust a "
+        "single pool_winrate.py run to confirm the winner. A 10-seed comparison has a "
+        "real noise floor of about +/-2 seeds even with identical code (see the "
+        "pool-winrate-noise-floor memory note / main.py's own docstring); run the "
+        "winner and the current baseline back-to-back in the same process at ~30 "
+        "seeds each before deciding to keep anything found here."
     )
 
 
