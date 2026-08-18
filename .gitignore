@@ -229,4 +229,5 @@ reference/community_dataset/
 # Local tool/IDE state
 .idea/
 .omc/
+.mcp.json
 
