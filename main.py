@@ -659,7 +659,9 @@ ANIMAL_MAX_PER_UNIT = 1.0  # hard cap on live animals, per farmer/hand currently
                             # note. ANIMAL_LAND_SHARE alone grows with quadrants bought
                             # regardless of crew size, letting the animal count outgrow
                             # what the same crew can also water/harvest/weed for
-ANIMAL_RESERVE = 1  # spare bought-but-not-yet-placed animal tokens to keep queued, per kind
+ANIMAL_RESERVE = 1  # spare bought-but-not-yet-placed animal tokens to keep queued, per kind --
+                    # known to let tokens strand with no empty structure to receive them in
+                    # some games; see _build_animal_orders's own "Known bug" note
 FEED_RESERVE_PER_ANIMAL = 2  # days of WHEAT buffer per live animal, bought directly from
                               # the market -- see _build_feed_orders for why
 FEED_MAX_PRICE_FRAC = 5.0  # a near-nonbinding backstop, not a real cap: missing a feed
@@ -911,7 +913,11 @@ def _animal_target(farm):
     count collapsed from ~17 to ~2-3 and weeds went uncleared for the rest
     of the season -- see the module docstring's Animal capacity vs crop
     capacity note. Shared by _AnimalPlanner and _build_animal_orders so
-    both always agree on the same cap."""
+    both always agree on the same cap -- though see
+    _build_animal_orders's own "Known bug" note: they still track
+    *committed* differently (shed tokens vs empty structures), which can
+    let purchases outrun confirmed structure availability even with the
+    same target."""
     unlocked_tiles = sum(1 for row in farm["tiles"] for tile in row if tile != "LOCKED")
     land_target = round(unlocked_tiles * ANIMAL_LAND_SHARE)
     total_units = 1 + len(farm["hands"])  # farmer + hands
@@ -1367,7 +1373,32 @@ def _build_animal_orders(farm, private, money):
     target well before purchases can catch up; counting empty structures
     as already "committed" here stopped this from ever buying enough
     animals to fill them, leaving land built but empty for the rest of the
-    season)."""
+    season).
+
+    **Known bug, fix attempted and reverted**: a real replay showed 1 COW
+    + 3 SHEEP ($1,900) permanently stuck in the shed from day ~16 through
+    day 28+ with every PASTURE/COOP already full -- animal tokens can't
+    be sold back once bought (COW/SHEEP/GOOSE aren't in kaggriculture.py's
+    own PRODUCTS list), so that money is gone for the rest of the game.
+    Confirmed in a second, unrelated replay too, so a real and recurring
+    cost, not a one-off. Root cause as best diagnosed: this function's
+    `committed` (shed tokens + live, ignoring empty structures) and
+    _AnimalPlanner's own `_committed()` (live + empty structures, ignoring
+    shed tokens) are two different counts that can drift apart, letting
+    purchases outrun confirmed structure availability. Two fix attempts
+    (gating purchases on empty-structure availability directly, at buffer
+    0 and buffer 1 tokens of slack) both measured *worse* than this
+    unfixed version in 10-seed pool comparisons against the exact same
+    trimmed pool -- head-to-head against `reference/main_fertilizer_
+    selling_submitted_20260817.py` went 9/10 -> 8/10 -> 5/10 seeds won as
+    the fix got progressively less permissive, the opposite of the
+    expected direction, and the regression reproduced across two separate
+    runs of the buffer=1 variant. Not fully explained why gating more
+    correctly against stranding costs more throughput than the stranding
+    itself -- reverted rather than ship an unexplained regression chasing
+    a bug worth an estimated ~$1,900/game (small next to the 20-50%
+    swings the fix attempts caused). Worth another look with a clearer
+    hypothesis before retrying."""
     orders = []
     shed = private.get("shed", {})
     target = _animal_target(farm)
