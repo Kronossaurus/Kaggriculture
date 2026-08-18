@@ -12,11 +12,14 @@ tracking (`checkpoints/v0/main.py`, the original one-tile wheat loop;
 Kernels for comparison only -- not ours, never submit it; and
 `reference/main_land_gate_60pct.py`, a frozen ablation of main.py itself --
 see its own docstring for the land-utilization-gate trade-off it tracks;
-and `reference/main_fertilizer_selling_submitted_20260817.py`, a frozen
+`reference/main_fertilizer_selling_submitted_20260817.py`, a frozen
 snapshot of the exact main.py submitted to Kaggle on that date -- see
-main.py's own docstring's Selling fertilizer note. Standing rule: every
-Kaggle submission gets snapshotted here so future runs automatically check
-new work against what was actually shipped, not just hand-picked
+main.py's own docstring's Selling fertilizer note; and
+`reference/main_plant_priority_submitted_20260818.py`, a frozen snapshot
+of the exact main.py submitted to Kaggle on that date -- see main.py's
+own docstring's Planting priority under the gate note. Standing rule:
+every Kaggle submission gets snapshotted here so future runs automatically
+check new work against what was actually shipped, not just hand-picked
 ablations.
 `kaggle_environments`' own `random`/`starter` built-ins were dropped from
 the default (2026-08-18): every main.py revision this session has beaten
@@ -51,6 +54,7 @@ DEFAULT_POOL = [
     "reference/x492_nah_i_d_win.py",
     "reference/main_land_gate_60pct.py",
     "reference/main_fertilizer_selling_submitted_20260817.py",
+    "reference/main_plant_priority_submitted_20260818.py",
 ]
 
 
