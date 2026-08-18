@@ -591,53 +591,72 @@ re-isolated -- both are independently well-motivated by the same replay
 evidence, and untangling their individual contributions wasn't worth
 another measurement pass given how clearly positive the combination is.
 
-**Sell/rebuy round trip on WHEAT**: `_build_sell_orders` and
-`_build_feed_orders` were reading the same shed WHEAT with no coordination
--- sell dumps the *entire* shed stock the moment price clears its 0.45x
-threshold with no notion that animals need some of it, then feed buys
-straight back from the market (a near-nonbinding backstop, willing to pay
-up to 5x base -- missing a feed loses the whole animal, so `FEED_MAX_
-PRICE_FRAC` is deliberately loose) as soon as the shed reads empty again.
-Selling low and rebuying at up to 5x base is a real, self-inflicted loss
-through both sides of the market's own price impact, and it's on top of
-that: our own sell already pushed the price down, so a same-turn or
-near-term rebuy is paying more of a spread than the raw prices alone
-would suggest. Fixed by having `_build_sell_orders` take a `feed_reserve`
-argument and hold back that many WHEAT units from the dump.
+**Sell/rebuy round trip on WHEAT -- fix attempted and reverted**:
+`_build_sell_orders` and `_build_feed_orders` read the same shed WHEAT
+with no coordination -- sell dumps the *entire* shed stock the moment
+price clears its 0.45x threshold with no notion that animals need some of
+it, then feed buys straight back from the market (a near-nonbinding
+backstop, willing to pay up to 5x base -- missing a feed loses the whole
+animal, so `FEED_MAX_PRICE_FRAC` is deliberately loose) as soon as the
+shed reads empty again -- a real, self-inflicted round trip through both
+sides of the market's own price impact, confirmed happening in a
+downloaded replay. Tried fixing it by having `_build_sell_orders` hold
+back a WHEAT reserve from the dump; three sizes were tried (a 2-day
+buffer matching `_build_feed_orders`'s own trigger, a 1-day buffer, and a
+small flat cap of 4 units decoupled from flock size), each looking
+better than the last on quick 10-seed pool checks -- but that whole
+trail turned out to be chasing partly-noisy signal, not a real
+improving trend (see the next note). A properly-powered recheck (30
+seeds, pre-fix and post-fix run back-to-back in the same process against
+`reference/main_fertilizer_selling_submitted_20260817.py`, the pool's
+strongest and most competitive opponent) told a different story: pre-fix
+25/30 (83.3%), post-fix (the "best" flat-cap-4 version) 16/30 (53.3%) --
+a genuine, large regression, not the honest-trade-off it first looked
+like. Plausible mechanism: holding back even a small reserve delays
+reinvestment (the same mechanism the per-turn-sell-cap revert above
+already demonstrated), which barely dents a blowout win against weak
+pool opponents (still 100% win rate, ceiling effect hides the cost) but
+flips close races against a closely-matched opponent where marginal
+efficiency actually decides the outcome. Reverted `_build_sell_orders`
+back to taking no reserve argument at all -- same pattern as
+`_build_animal_orders`'s own "Known bug" note below: a theoretically
+correct fix that measured worse and got reverted rather than shipped on
+faith. The underlying round trip is still real and still unaddressed;
+worth another look with a smaller-footprint idea (e.g. coordinating the
+sell and feed decisions within the same turn instead of a standing
+reserve) and, per the next note, with a large enough seed count to trust
+the result.
 
-**Sizing `feed_reserve` took three tries, each measured against the same
-10-seed pool**. First try: `live_animals * FEED_RESERVE_PER_ANIMAL` (the
-same 2-day buffer `_build_feed_orders` uses as its own market-buy
-trigger) -- reusing that constant seemed natural but was a real mistake:
-it's calibrated for how much slack the *buy* side wants, not how much the
-*sell* side can afford to leave permanently unsold. With a large-ish
-flock (the current hire formula's crew easily supports 10+ animals) that
-reserve routinely exceeded total shed WHEAT, blocking the sell almost
-entirely -- WHEAT is CROP_TARGET_SHARE's second-largest crop (0.25,
-behind only MELON), so this was a severe regression: head-to-head against
-`reference/main_fertilizer_selling_submitted_20260817.py` fell from the
-known 9/10 baseline to 4/10, POOL TOTAL 66%. Second try: `live_animals`
-(1 day instead of 2) -- better but still scaled with flock size, still
-below baseline (6/10, POOL TOTAL 72%). Third try, kept: `min(live_animals,
-4)`, a small flat cap decoupled from flock size entirely -- only meant to
-survive the same-turn zero-out that causes an *immediate* rebuy; a larger
-flock's fuller buffer is still covered by `_build_feed_orders`'s own
-market-buy backstop, just spread over a few turns instead of forced in
-one lump. Best result of the three (7/10, POOL TOTAL 74%) and money up
-25-40% against the non-adversarial pool (`checkpoints/v0` $52.6k ->
-$65.7k, `main_land_gate_60pct.py` $47.2k -> $66.3k, both now 10/10) --
-but still short of the pre-fix 9/10 head-to-head, an honest trade-off in
-the same spirit as the Neglected-tile-urgency note above: not a clean win
-in every single matchup, but a real correctness fix (a WHEAT round trip a
-downloaded replay actually showed happening) that gains far more than it
-costs in aggregate. Skipped once `liquidating`, matching the existing
-endgame-liquidation behavior: unsold shed contents don't count toward the
-final score at all that close to the end, so there's nothing to protect
-by holding any of it back. `feed_reserve` is computed once in `agent()`
-with the same `_live_animal_count` helper `_build_feed_orders`/
-`_build_animal_orders` already used, so all three can't drift apart on
-what "live" means -- see `_build_animal_orders`'s own "Known bug" note
-about exactly that kind of drift causing a different, unrelated bug.
+**A real non-determinism in the eval harness was found investigating the
+above, and it changes how every pool comparison in this project should
+be read.** `kaggle_environments`' `seed` config does properly determinize
+the one RNG source inside the kaggriculture interpreter itself (weed
+spawning, keyed off `seed` and `day` -- see kaggriculture.py's
+`_end_of_day`), and neither `main.py` nor any reference agent calls
+`random` directly, so identical code given an identical seed *should* be
+fully reproducible. It measurably isn't: rerunning the exact same 10-seed
+script (no code change at all) gave 9/10, 9/10, then 7/10 across three
+attempts, with the 7/10 outlier appearing specifically when it ran
+concurrently with another heavy background episode batch -- and,
+separately, the *same* 10-seed matchup scored differently depending on
+whether it was the only thing a script ran versus the last of 50
+episodes in a single `pool_winrate.py` invocation, even with nothing else
+running on the machine at the time. Root cause not fully pinned down
+(the `actTimeout: 1` per-turn wall-clock config is a plausible
+suspect -- our own `agent()` call measures ~0.2ms in isolation, comfortable
+headroom, but that headroom could erode under CPU contention or
+within-process memory/GC pressure over a long-running multi-episode
+script), but the practical takeaway is solid either way: **a single
+10-seed comparison has a real noise floor around +/-2 seeds out of 10**,
+enough to make a fix look clearly better or clearly worse than it
+actually is (exactly what happened chasing the WHEAT-reserve sizes
+above). Treat any single 10-seed `pool_winrate.py` result with real
+skepticism going forward -- rerun it, or use a larger seed count (the
+30-seed script that caught this regression is the model to follow), for
+any comparison a real decision rests on. Running pool comparisons one at
+a time rather than concurrently with other heavy background work is
+still good hygiene, but per the 50-episode-vs-10-episode finding above,
+isolation alone isn't a full guarantee.
 """
 
 from __future__ import annotations
@@ -1285,7 +1304,7 @@ def _decide_unit(
     return ["PASS"]
 
 
-def _build_sell_orders(shed, prices, days_remaining, feed_reserve=0):
+def _build_sell_orders(shed, prices, days_remaining):
     """Dumps the entire shed stock of a crop in one order once its price
     threshold is met -- same behavior as melon_maxxer, deliberately reverted
     from an earlier version that capped units sold per turn (see the module
@@ -1295,18 +1314,9 @@ def _build_sell_orders(shed, prices, days_remaining, feed_reserve=0):
     version, `reference/main_dump_sell.py`): holding harvested value in the
     shed waiting for the cap to free up slows reinvestment into land/seeds/
     hands more than an occasional price dip costs, at this agent's actual
-    production scale.
-
-    `feed_reserve` (see the module docstring's Sell/rebuy round-trip note)
-    holds back that many WHEAT units from the dump: without it, this
-    function and `_build_feed_orders` disagree about what shed WHEAT is
-    *for* -- this one sells all of it the moment price clears a 0.45x-base
-    threshold, then feed buys it straight back from the market (willing to
-    pay up to 5x base -- see `FEED_MAX_PRICE_FRAC`) as soon as the shed
-    reads empty, a self-inflicted round trip through both sides of the
-    market's price impact. Skipped once `liquidating`: unsold shed contents
-    don't count toward the final score at all, so there's no point holding
-    any of it back that close to the end.
+    production scale. See the module docstring's Sell/rebuy round-trip note
+    for a second, more targeted attempt at holding back WHEAT specifically
+    (for animal feed) that hit the same wall for the same underlying reason.
     """
     orders = []
     shed_total = sum(shed.values())
@@ -1314,8 +1324,6 @@ def _build_sell_orders(shed, prices, days_remaining, feed_reserve=0):
     liquidating = days_remaining <= ENDGAME_LIQUIDATION_DAYS
     for crop, params in SELL_PARAMS.items():
         qty = shed.get(crop, 0)
-        if crop == "WHEAT" and not liquidating:
-            qty -= feed_reserve
         if qty <= 0:
             continue
         base = MARKET_PARAMS[crop]["base"]
@@ -1540,15 +1548,8 @@ def agent(obs, config=None):
     ]
     farmer_action, hands_actions = actions[0], actions[1:]
 
-    # Small flat cap, not scaled to flock size -- see _build_sell_orders's
-    # docstring. Only meant to survive the same-turn zero-out that causes an
-    # immediate rebuy; a large flock's fuller reserve is still covered by
-    # _build_feed_orders's own market-buy backstop, just spread over a few
-    # turns instead of forced in one lump.
-    feed_reserve = min(_live_animal_count(farm), 4)
-
     market = []
-    market += _build_sell_orders(shed, market_prices, days_remaining, feed_reserve)
+    market += _build_sell_orders(shed, market_prices, days_remaining)
     market += _build_land_orders(farm, days_remaining)
     market += _build_hire_orders(farm)
     market += _build_feed_orders(farm, private, market_prices, farm["money"])

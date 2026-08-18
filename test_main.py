@@ -214,34 +214,6 @@ def test_build_sell_orders_holds_below_threshold():
     assert orders == []
 
 
-def test_build_sell_orders_holds_back_the_feed_reserve():
-    """Locks the sell/rebuy round-trip fix (see module docstring): don't
-    dump WHEAT the feed side still needs, or it just gets bought straight
-    back from the market at a worse price."""
-    shed = {"WHEAT": 47}
-    prices = {"WHEAT": 30}  # well above WHEAT's 0.45 * base(25) = 11.25 threshold
-    orders = main._build_sell_orders(shed, prices, days_remaining=20, feed_reserve=10)
-    assert orders == [["SELL", "WHEAT", 37]]
-
-
-def test_build_sell_orders_feed_reserve_can_block_the_sale_entirely():
-    shed = {"WHEAT": 8}
-    prices = {"WHEAT": 30}
-    orders = main._build_sell_orders(shed, prices, days_remaining=20, feed_reserve=10)
-    assert orders == []
-
-
-def test_build_sell_orders_ignores_feed_reserve_while_liquidating():
-    """Unsold shed contents don't count toward the final score at all this
-    close to the end, so there's nothing to gain by holding WHEAT back."""
-    shed = {"WHEAT": 8}
-    prices = {"WHEAT": 30}
-    orders = main._build_sell_orders(
-        shed, prices, days_remaining=main.ENDGAME_LIQUIDATION_DAYS, feed_reserve=10
-    )
-    assert orders == [["SELL", "WHEAT", 8]]
-
-
 def test_build_land_orders_blocked_below_utilization_gate():
     """See module docstring's Land utilization gate note: a replay showed
     this agent buying its 4th quadrant by day 11 while plateauing at
