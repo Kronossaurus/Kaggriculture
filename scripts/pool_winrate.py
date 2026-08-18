@@ -5,10 +5,8 @@ one baseline." Every prior evaluation in this project (`run_local.py`,
 `rl/analyze_actions.py`) only ever compared against a single fixed opponent;
 this is the missing piece.
 
-Default pool is every lightweight, dependency-free opponent currently
-available: the two `kaggle_environments` built-ins worth testing against
-(`random`, `starter`) plus the scripted reference agents in this repo
-(`checkpoints/v0/main.py`, the original one-tile wheat loop;
+Default pool is every scripted reference agent in this repo worth
+tracking (`checkpoints/v0/main.py`, the original one-tile wheat loop;
 `reference/melon_maxxer.py`, Kaggle's own official single-crop example;
 `reference/x492_nah_i_d_win.py`, a strong external agent pulled from Kaggle
 Kernels for comparison only -- not ours, never submit it; and
@@ -20,6 +18,11 @@ main.py's own docstring's Selling fertilizer note. Standing rule: every
 Kaggle submission gets snapshotted here so future runs automatically check
 new work against what was actually shipped, not just hand-picked
 ablations.
+`kaggle_environments`' own `random`/`starter` built-ins were dropped from
+the default (2026-08-18): every main.py revision this session has beaten
+both 10/10 seeds by a wide margin, so they no longer discriminate between
+changes -- pass `--pool random starter` explicitly if a fresh sanity check
+against them is ever needed again.
 No RL checkpoint is included -- see rl/README.md, none survive the current
 action space.
 
@@ -43,8 +46,6 @@ sys.path.insert(0, str(SCRIPT_DIR))
 from run_local import resolve_agent  # noqa: E402
 
 DEFAULT_POOL = [
-    "random",
-    "starter",
     "checkpoints/v0/main.py",
     "reference/melon_maxxer.py",
     "reference/x492_nah_i_d_win.py",
