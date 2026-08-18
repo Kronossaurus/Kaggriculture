@@ -65,6 +65,11 @@ def _farm(tiles):
     }
 
 
+_NEUTRAL_QUADRANT_UTIL = {"NW": 0.0, "NE": 0.0, "SW": 0.0, "SE": 0.0}  # no quadrant-balance
+                                                                        # bias -- for tests that
+                                                                        # don't exercise it
+
+
 def test_is_harvestable_false_immediately_after_planting():
     """The core bug: WHEAT's first_yield_day is 2, but _new_plant seeds
     yield_units at 1 the instant it's planted (kaggriculture.py) -- so
@@ -107,7 +112,7 @@ def test_decide_unit_digs_a_weed_instead_of_stalling():
     action = main._decide_unit(
         pos=[0, 0], inv={}, farm=farm, private={"shed": {}}, day=0, board_size=3, claimed=claimed,
         planner=planner, animal_planner=animal_planner, shed_tiles=set(), want_fertilizer=False, liquidating=False,
-        animal_zone=set(), quadrant_util={"NW": 0.0, "NE": 0.0, "SW": 0.0, "SE": 0.0},
+        animal_zone=set(), quadrant_util=_NEUTRAL_QUADRANT_UTIL,
     )
     assert action == ["DIG"]
 
@@ -128,7 +133,7 @@ def test_decide_unit_drops_surplus_fertilizer_at_the_shed():
         pos=[0, 0], inv={"FERTILIZER": 3}, farm=farm, private={"shed": {}}, day=0, board_size=3,
         claimed=claimed, planner=planner, animal_planner=animal_planner, shed_tiles={(0, 0)},
         want_fertilizer=False, liquidating=False, animal_zone=set(),
-        quadrant_util={"NW": 0.0, "NE": 0.0, "SW": 0.0, "SE": 0.0},
+        quadrant_util=_NEUTRAL_QUADRANT_UTIL,
     )
     assert action == ["DROP"]
 
@@ -154,7 +159,7 @@ def test_decide_unit_keeps_freshly_picked_up_fertilizer_when_still_needed():
         pos=[0, 0], inv={"FERTILIZER": 1}, farm=farm, private={"shed": {}}, day=0, board_size=3,
         claimed=set(), planner=planner, animal_planner=animal_planner, shed_tiles={(0, 0)},
         want_fertilizer=True, liquidating=False, animal_zone=set(),
-        quadrant_util={"NW": 0.0, "NE": 0.0, "SW": 0.0, "SE": 0.0},
+        quadrant_util=_NEUTRAL_QUADRANT_UTIL,
     )
     assert action == ["EAST"]  # walks toward the fertilizable tile at (2, 2), doesn't DROP
 
