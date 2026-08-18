@@ -103,11 +103,60 @@ def test_decide_unit_digs_a_weed_instead_of_stalling():
     farm = _farm({(0, 0): weed})
     claimed = set()
     planner = main._CropPlanner({"seeds": {}}, farm, days_remaining=20)
+    animal_planner = main._AnimalPlanner(farm, {}, {})
     action = main._decide_unit(
         pos=[0, 0], inv={}, farm=farm, private={"shed": {}}, day=0, board_size=3, claimed=claimed,
-        planner=planner, shed_tiles=set(), want_fertilizer=False, liquidating=False,
+        planner=planner, animal_planner=animal_planner, shed_tiles=set(), want_fertilizer=False, liquidating=False,
+        animal_zone=set(), quadrant_util={"NW": 0.0, "NE": 0.0, "SW": 0.0, "SE": 0.0},
     )
     assert action == ["DIG"]
+
+
+def test_decide_unit_drops_surplus_fertilizer_at_the_shed():
+    """See the module docstring's Selling fertilizer note: FERTILIZER
+    collected from animal structures used to be excluded from "carried
+    produce" unconditionally, so once nothing was left to fertilize a unit
+    holding surplus collected FERTILIZER had no candidate to chase at all
+    and just sat on it for the rest of the game instead of banking it in
+    the shed to sell. A unit standing at the shed with no fertilizable crop
+    anywhere should drop it, not PASS."""
+    farm = _farm({})  # no plant tiles anywhere -> nothing is fertilizable
+    claimed = set()
+    planner = main._CropPlanner({"seeds": {}}, farm, days_remaining=20)
+    animal_planner = main._AnimalPlanner(farm, {}, {})
+    action = main._decide_unit(
+        pos=[0, 0], inv={"FERTILIZER": 3}, farm=farm, private={"shed": {}}, day=0, board_size=3,
+        claimed=claimed, planner=planner, animal_planner=animal_planner, shed_tiles={(0, 0)},
+        want_fertilizer=False, liquidating=False, animal_zone=set(),
+        quadrant_util={"NW": 0.0, "NE": 0.0, "SW": 0.0, "SE": 0.0},
+    )
+    assert action == ["DROP"]
+
+
+def test_decide_unit_keeps_freshly_picked_up_fertilizer_when_still_needed():
+    """The regression the first version of the fix above caused (see the
+    module docstring's Selling fertilizer note): a unit standing at the
+    shed holding FERTILIZER it just fetched for delivery must NOT
+    immediately DROP it back the moment want_fertilizer is still true, or
+    every fertilizer pickup livelocks PICKUP/DROP forever -- a 10-seed pool
+    comparison with that version collapsed mean money from ~$36-38k to
+    ~$2,290 against `random` alone."""
+    board = [["LOCKED" for _ in range(3)] for _ in range(3)]
+    board[0][0] = None  # the unit's own (shed-adjacent) tile
+    board[2][2] = _tile(crop="WHEAT", planted_day=0, watered_today=True)  # fertilizable
+    farm = {
+        "money": 3000.0, "tiles": board, "farmer": [0, 0], "hands": [],
+        "unlocked_quadrants": ["NW"], "hires_today": 0,
+    }
+    planner = main._CropPlanner({"seeds": {}}, farm, days_remaining=20)
+    animal_planner = main._AnimalPlanner(farm, {}, {})
+    action = main._decide_unit(
+        pos=[0, 0], inv={"FERTILIZER": 1}, farm=farm, private={"shed": {}}, day=0, board_size=3,
+        claimed=set(), planner=planner, animal_planner=animal_planner, shed_tiles={(0, 0)},
+        want_fertilizer=True, liquidating=False, animal_zone=set(),
+        quadrant_util={"NW": 0.0, "NE": 0.0, "SW": 0.0, "SE": 0.0},
+    )
+    assert action == ["EAST"]  # walks toward the fertilizable tile at (2, 2), doesn't DROP
 
 
 def test_step_toward_moves_one_axis_at_a_time():
@@ -152,6 +201,25 @@ def test_build_land_orders_buys_once_utilization_gate_is_met():
     farm["money"] = 5000.0
     orders = main._build_land_orders(farm, days_remaining=20)
     assert orders == [["BUY_LAND"]]
+
+
+def test_build_land_orders_blocked_at_max_useful_quadrants():
+    """A replay caught this: the hire formula (2*quadrants, capped at
+    MAX_HANDS=6) already maxes out at 3 quadrants, so the 4th never
+    unlocks another hand -- buying it just spreads the same crew across
+    more land. The same 6 hands planted no more tiles in absolute terms
+    with 4 quadrants than with 3, just diluted thinner. Don't buy it even
+    at full utilization and plenty of cash. (Task-driven hiring -- sizing
+    the crew off actual pending work instead of this flat quadrant formula
+    -- was tried and reverted, see the module docstring's Task-driven
+    hiring note: it consistently underperformed this simpler cap in every
+    variant measured.)"""
+    tiles = {(x, y): _tile() for x in range(3) for y in range(3)}  # 9 of 9 planted (100%)
+    farm = _farm(tiles)
+    farm["unlocked_quadrants"] = ["NW", "NE", "SW"]
+    farm["money"] = 50000.0
+    orders = main._build_land_orders(farm, days_remaining=20)
+    assert orders == []
 
 
 def test_crop_planner_balances_toward_target_share():
@@ -199,6 +267,50 @@ def test_crop_planner_excludes_crops_that_cannot_mature_in_time():
     planner = main._CropPlanner(private, farm, days_remaining=5)
     assert "MELON" not in planner.plantable_crops
     assert planner.choose() in ("WHEAT", "CARROT")
+
+
+def test_find_target_prefers_the_less_planted_quadrant_on_a_distance_tie():
+    """See the module docstring's spatial clustering (crops) note: a replay
+    showed one quadrant planted dense while another sat mostly empty --
+    _find_target's plain nearest-tile-wins selection has no reason to ever
+    look past a marginally-closer chore in the already-crowded quadrant.
+    On a distance tie between an empty tile in a crowded quadrant (NW, 3/4
+    planted) and one in an untouched quadrant (NE, 0/4), the untouched
+    quadrant should win."""
+    board_size = 4
+    tiles = [[None for _ in range(board_size)] for _ in range(board_size)]
+    for (x, y) in [(0, 0), (1, 0), (0, 1)]:
+        tiles[y][x] = _tile(watered_today=True)  # tended, so not a competing water candidate
+    farm = {"tiles": tiles}
+    private = {"seeds": {"WHEAT": 5}}
+    planner = main._CropPlanner(private, farm, days_remaining=20)
+    animal_planner = main._AnimalPlanner(farm, {}, {})
+    quadrant_util = main._quadrant_utilization(farm, board_size)
+    target = main._find_target(
+        pos=[1, 0], farm=farm, day=0, board_size=board_size, claimed=set(), inv={},
+        planner=planner, animal_planner=animal_planner, shed_tiles=set(),
+        want_fertilizer=False, shed_wheat_available=False, liquidating=False,
+        animal_zone=set(), quadrant_util=quadrant_util,
+    )
+    assert (target[0], target[1]) == (2, 0)  # NE's empty tile, not NW's (1, 1) despite equal raw distance
+
+
+def test_animal_zone_prefers_tiles_closest_to_shed():
+    """See the module docstring's spatial clustering (animals) note: animal
+    structures should claim the empty tiles nearest the shed first, not
+    whichever empty tile a crop happens to reach first. Occupy the shed
+    ring itself so the zone must pick from the next ring out -- if it were
+    falling back to "any empty tile" (e.g. a stray reference to a far
+    corner), this distance check would catch it."""
+    board_size = 5
+    tiles = [[None for _ in range(board_size)] for _ in range(board_size)]
+    for (sx, sy) in main._shed_adjacent_tiles(board_size):
+        tiles[sy][sx] = {"kind": "PLANT"}  # occupy the shed ring itself
+    farm = {"tiles": tiles}
+    zone = main._animal_zone(farm, board_size, needed=1)
+    ((zx, zy),) = zone
+    assert main._dist_to_shed(zx, zy, board_size) == 1
+    assert main._dist_to_shed(0, 0, board_size) > 1  # a far corner must lose out
 
 
 def _all_tests():

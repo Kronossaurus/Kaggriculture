@@ -9,10 +9,19 @@ Default pool is every lightweight, dependency-free opponent currently
 available: the two `kaggle_environments` built-ins worth testing against
 (`random`, `starter`) plus the scripted reference agents in this repo
 (`checkpoints/v0/main.py`, the original one-tile wheat loop;
-`reference/melon_maxxer.py`, Kaggle's own official single-crop example; and
+`reference/melon_maxxer.py`, Kaggle's own official single-crop example;
 `reference/x492_nah_i_d_win.py`, a strong external agent pulled from Kaggle
-Kernels for comparison only -- not ours, never submit it). No RL checkpoint
-is included -- see rl/README.md, none survive the current action space.
+Kernels for comparison only -- not ours, never submit it; and
+`reference/main_land_gate_60pct.py`, a frozen ablation of main.py itself --
+see its own docstring for the land-utilization-gate trade-off it tracks;
+and `reference/main_fertilizer_selling_submitted_20260817.py`, a frozen
+snapshot of the exact main.py submitted to Kaggle on that date -- see
+main.py's own docstring's Selling fertilizer note. Standing rule: every
+Kaggle submission gets snapshotted here so future runs automatically check
+new work against what was actually shipped, not just hand-picked
+ablations.
+No RL checkpoint is included -- see rl/README.md, none survive the current
+action space.
 
 Usage:
     uv run scripts/pool_winrate.py                              # main.py vs the default pool, 20 seeds each
@@ -39,6 +48,8 @@ DEFAULT_POOL = [
     "checkpoints/v0/main.py",
     "reference/melon_maxxer.py",
     "reference/x492_nah_i_d_win.py",
+    "reference/main_land_gate_60pct.py",
+    "reference/main_fertilizer_selling_submitted_20260817.py",
 ]
 
 

@@ -42,6 +42,98 @@ the throttling's own opportunity cost. `_build_sell_orders` now dumps in
 full again, like melon_maxxer, with the shed-overflow-guard threshold-bypass
 (`SHED_OVERFLOW_GUARD`) kept since that part was never in question.
 
+**Selling strategy, revisited and closed out**: the 19/20-seed result above
+was measured, not explained, at the time. Working out *why* (`market_price`/
+`_refresh_prices` in kaggle_environments' own `kaggriculture.py`, plus a real
+downloaded replay -- see `reference/community_dataset/` and the module
+docstring's earlier replay-tooling notes): price is a deterministic function
+of the market's *current* inventory level alone, and every SELL adds to that
+inventory one unit at a time with no reset in between orders. That makes
+total revenue for selling a fixed total quantity mathematically *path-
+independent* -- one 80-unit MELON order and eighty 1-unit MELON orders
+starting from the same inventory produce the exact same total revenue to
+the dollar (verified numerically: both settle at $18,329 for a solo 80-unit
+dump from I0). Splitting an order can only ever change *when* the cash
+lands, never how much of it there is, absent inventory recovery in between
+-- and recovery is too slow to matter at this agent's production scale for
+the resources that matter most (MELON/WOOL have no town shop demand at all,
+only the town center's flat ~1-unit/day trickle, per the Price-aware
+planting note above). This is the mechanistic reason throttled selling lost:
+it paid the exact same total price degradation as dumping, plus a pure,
+avoidable reinvestment delay. A downloaded replay
+(`replays/kaggle_submission/episode-94006627-replay.json`) also confirmed
+the market really is shared and concurrent exactly as `data/README.md`
+describes: turns where both players sold the same resource showed the
+market's inventory change reflecting *both* players' volume (partly offset
+by that turn's town consumption), meaning an opponent selling the same crop
+the same turn does affect the price we receive -- but this is a genuinely
+uncontrollable multiplayer dynamic, not something our own order batching,
+timing, or list position can influence, since we choose our market orders
+without seeing the opponent's for that same turn. Conclusion: there is no
+selling-mechanism fix left to find here -- the only lever that actually
+moves this needle is *how much* gets produced/sold in total over the
+season relative to town absorption capacity, which is exactly what the
+Land utilization gate, Task-driven hiring, and Price-aware planting notes
+elsewhere in this docstring already investigated (and, in every case but
+the land gate, reverted after measuring it made things worse). No code
+change came out of this pass; it exists to stop a future session from
+re-litigating "maybe throttled/staggered selling would help" without first
+re-deriving this.
+
+**Selling fertilizer**: closing out the selling investigation above still
+left one concrete question unasked -- *what* top players actually sell, not
+just how. Breaking down `reference/community_dataset/`'s top-ladder replays
+by per-resource revenue (four games, three different top players) found
+FERTILIZER as the single largest or second-largest revenue source in every
+one of them (21-59% of total sell revenue, ahead of WHEAT and comparable to
+or ahead of WOOL), while MELON -- this agent's dominant crop share -- was
+consistently minor for the strongest player (5-9%). This agent never sold
+FERTILIZER at all: it's not in `SELL_PARAMS`, and FERTILIZER collected from
+animal structures via `COLLECT_FERTILIZER` landed in a unit's own inventory
+with only one way out -- `_find_target`'s "deliver fertilizer" candidate,
+which only exists while some crop tile is still eligible
+(`_is_fertilizable`). Once nothing needed it, a unit carrying surplus
+collected FERTILIZER had no candidate left to chase at all (the shed-return
+trigger explicitly excluded FERTILIZER from what counted as "produce") and
+just sat there holding it, forever, for the rest of the game. Fixed by
+letting surplus FERTILIZER count as "carried produce" (sellable once
+`SELL_PARAMS["FERTILIZER"]`'s threshold clears) whenever `not
+want_fertilizer` -- i.e. only when nothing on the whole farm is currently
+fertilizable, never while a delivery is still possible. **The first version
+of this fix dropped the `want_fertilizer` condition entirely** (any carried
+FERTILIZER always counted as produce), reasoning that `_find_target`'s
+higher-priority delivery candidate (3) would always beat the shed-return
+one (5/1) regardless of distance so it could never misroute -- true for
+routing, but it broke something routing doesn't touch: `_decide_unit`'s
+direct-action shed-tile branch runs *before* a unit that just PICKUP'd
+FERTILIZER (to carry to a crop) has moved anywhere. With the unconditional
+version, that same turn's decision saw the freshly-picked-up FERTILIZER as
+"carried produce" and immediately DROPped it back -- a PICKUP/DROP livelock
+identical in shape to the animal-token livelock from the Animal husbandry
+(attempt 3) note, just for FERTILIZER instead of an animal, and far more
+damaging since fertilizer pickups happen constantly (WHEAT/CARROT/TOMATO/
+STRAWBERRY all use it): a 10-seed pool comparison with this version was a
+catastrophic regression across the board, e.g. mean money vs `random`
+collapsing from ~$36-38k to ~$2,290 and the win rate against the whole pool
+dropping from 83.3% to 23.3%. Restoring the `want_fertilizer` gate fixes
+it: a unit can only ever see carried FERTILIZER as sellable produce on a
+turn where fetching more of it for delivery wouldn't even be attempted in
+the first place. 10-seed pool comparison with the fix confirmed the
+livelock was the whole story and the underlying idea was sound: mean money
+rose ~20-26% against every non-adversarial pool opponent on top of the
+spatial-clustering gains above (e.g. `random` $40-44k -> $50-52k), the
+head-to-head against `reference/main_land_gate_60pct.py` held at a clean
+10/10-seed win with an even wider margin ($51,621 vs $22,970, up from
+$39,640 vs $22,698), and mean money against x492 rose ~37% ($24,583 ->
+$33,603) even though that matchup is still an outright loss on every seed.
+One accepted imprecision that survives both versions: the
+shed's FERTILIZER count is a single fungible pool for both collected (free)
+and market-bought stock, so `_build_fertilizer_orders`' own small standing
+reserve (`FERTILIZER_RESERVE = 2`) can occasionally get swept into a sell
+dump and get rebought next cycle -- a bounded, minor churn cost against a
+much larger potential revenue stream, not worth a separate reserved-vs-
+sellable split for 2 units.
+
 Animal support (GOOSE/COW/SHEEP) was implemented and A/B tested
 (`reference/main_with_animals_v1.py`) and found to be a clear net negative --
 roughly a 70% cut to final money vs. this animal-free version, deterministic
@@ -73,6 +165,88 @@ loss across the board -- e.g. -66% mean money vs `random`, -62% vs
 too much crop-tending capacity to give up for what animals produce in a
 30-day season, at this agent's crop economics. Don't retry without first
 finding a much cheaper way to fund animal upkeep than a fixed hand tax.
+
+**Tried a third time, kept**: downloaded top-ladder replays (the
+`georgymamarin/kaggriculture-episodes` community dataset, see
+`reference/community_dataset/`, plus `scripts/extract_replay_tape.py`)
+showed real players sizing animal structures as a steady ~15-24% of owned
+land throughout the season, gradually scaled with land bought -- not a
+fixed hand allocation like attempt 2. `_AnimalPlanner` now targets
+`ANIMAL_LAND_SHARE` (0.18, the middle of that observed range) of owned
+tiles, and there's no dedicated crew: every unit, farmer included, shares
+one decision function (`_decide_unit`/`_find_target`) across both crop and
+animal work, with FEED as the single highest priority of anything (a
+missed feed still costs the whole $300-500+ animal). Two real bugs
+surfaced building this, both now regression-tested:
+- A livelock: `PICKUP`-ing a bought animal token, then immediately
+  `DROP`-ping it back into the shed the same turn, forever -- the generic
+  "carried produce" auto-drop check didn't exclude animal tokens
+  (COW/SHEEP/GOOSE) the way it already excluded FERTILIZER/WHEAT, so a
+  freshly-picked-up animal got treated as sellable produce and dumped
+  right back.
+- A self-defeating target: when the shed had no WHEAT, a unit with none in
+  hand would still generate a "go to the shed" candidate at the highest
+  priority (more urgent than harvesting) to fetch feed -- and if that unit
+  was already standing on a shed tile, the candidate pointed at its own
+  position, so `_step_toward` returned nothing and it just `PASS`ed every
+  turn instead of doing any of the crop work sitting right next to it.
+  Fixed by only generating that candidate when the shed actually has WHEAT
+  to fetch.
+
+Once genuinely working (no starvation, no idle land, no livelocks), the
+same replays gave one more data point: 5 of 5 downloaded top-ladder
+episodes (3 different players) never place a single GOOSE, despite it
+being the cheapest animal to buy. The economics explain why -- $/day per
+animal (product base price / production interval) is $80 for COW (MILK
+160/2), $66.7 for SHEEP (WOOL 200/3), only $50 for GOOSE (EGG 50/1), the
+worst of the three. `ANIMAL_TARGET_SHARE` was rebalanced to COW 0.60 /
+SHEEP 0.40 / GOOSE 0 to match. Setting a kind's target share to 0 alone
+wasn't enough, though, and briefly made results *worse*:
+`_AnimalPlanner.choose_structure`'s "which kinds still need a structure"
+filter checked only whether that kind's structure type had zero spares
+right now, not whether the kind was below its target share -- since GOOSE
+never gets built, its COOP count sits at 0 forever, so the instant
+COW/SHEEP's shared PASTURE type had a spare waiting, GOOSE became the
+*only* candidate left in the filtered pool and won by default regardless
+of its 0 share. Fixed by excluding 0-share kinds from that filter (and
+from `_build_animal_orders`'s purchase loop) directly. 10-seed pool
+comparison after both fixes: back in line with the no-animal baseline
+against the non-adversarial pool, and the best head-to-head result of any
+animal attempt against `reference/main_land_gate_60pct.py` -- 2/10 seeds
+won outright, mean money 18,051 vs 19,191 (a 0.94 ratio, vs. 0.60 with the
+GOOSE bug and 0.82 before any GOOSE fix at all). Still down against x492
+specifically (~-30% mean money vs. the no-animal baseline there) --
+x492's land/crop economy alone is strong enough that animal upkeep isn't
+worth the turns against it, even though it's a net-neutral-to-positive
+trade everywhere else measured.
+
+**Spatial clustering (animals), addressed**: the same top-ladder replays
+place animal structures in a tight cluster immediately around the shed,
+leaving crops the rest of the map edge-to-edge -- plausibly because FEED
+is daily and unmissable, so keeping every animal within a short walk of
+the shed (where feed/product pickup and drop already happen) minimizes
+the turns the whole feeding round costs. This agent had no such geometric
+preference: `_find_target`/`_decide_unit` treated "nearest empty tile"
+identically whether a crop or a structure wanted it, so animals and crops
+competed for the same near-shed tiles instead of animals deliberately
+claiming the center and crops spreading outward. `_animal_zone` now
+reserves the N empty tiles closest to the shed (N = however many
+structures `_AnimalPlanner` still needs to reach its land-share target)
+for BUILD_PASTURE/BUILD_COOP specifically; crop planting is skipped on
+those reserved tiles (falling through to the next-nearest empty tile
+instead), and any structure need beyond the zone still falls back to
+whatever empty tile is nearest, same as before. This was the real
+bottleneck behind attempt 3's lukewarm head-to-head result above, not
+animal husbandry itself: 10-seed pool comparison after adding the zone
+jumped from a 2/10-seed head-to-head win against
+`reference/main_land_gate_60pct.py` (0.94 money ratio) to a clean 10/10,
+1.69 ratio ($38,125 vs $22,621), and mean money against the whole
+non-adversarial pool rose ~40% across the board (e.g. $25k -> $36-38k vs
+`random`/`starter`/`melon_maxxer`). Even against x492 (still an outright
+loss, 0/10 seeds) our own money more than doubled ($9,826 -> $21,220).
+Plausibly compounds with the pre-existing tile-clustering gap below (which
+remains unaddressed -- this only reserves land for animals, it doesn't
+spread crops outward on its own).
 
 **Price-aware planting**: MELON's price curve is punished quadratically for
 oversupply above equilibrium (`data/README.md`'s Price Function, the `sq`
@@ -112,6 +286,93 @@ smaller gain) -- more hands means more simultaneous harvests dumped into
 the same finite-demand market, which crashes prices faster than the extra
 fib-scaling hire cost pays back. `MAX_HANDS` and the hire formula are back
 to their original values; only the land gate stuck.
+
+**The gate's own threshold was recalibrated after real Kaggle replays
+exposed a deadlock**: `LAND_UTILIZATION_GATE` originally shipped at 0.6.
+Downloaded replays from actual leaderboard games (`scripts/
+extract_replay_tape.py`) showed this agent's *own* achievable utilization
+plateauing at ~48-56% across every real opponent -- consistently just
+below the gate -- so it stayed permanently stuck at 2 of 4 quadrants for
+the entire 30-day season in 3 of 4 real games, never recovering even with
+$25k+ sitting unused. Against weak pool opponents this was invisible (this
+agent still wins by a huge margin off 2 quadrants alone), but it's a real
+cost against a contested market -- go watch `reference/main_land_gate_60pct.py`
+lose that same land race. Lowered to 0.45 (below the observed ceiling, so
+it can't deadlock) fixes that: reliably reaches all 4 quadrants now.
+**But lowering the threshold alone was a real trade-off, not a clean fix**:
+10-seed pool comparison showed -18 to -21% mean money against every
+non-adversarial pool opponent and -39% against x492 -- the same oversupply
+dynamic as the reverted `MAX_HANDS` experiment above, and a head-to-head
+against `reference/main_land_gate_60pct.py` (identical except that one
+constant) was a 1/10-seed *loss*, -34% mean money. A head-to-head replay
+found why: the hire formula (`2 * quadrants`, capped at `MAX_HANDS = 6`)
+already maxes out hire capacity at 3 quadrants (2*3 = 6) -- the 4th
+quadrant *never* unlocks another hand under it, so buying it just spreads
+the same crew across 25 more tiles. The replay showed the 0.45 agent
+planting no more tiles in absolute terms with 4 quadrants than the 0.6
+agent did with 3 -- diluted thinner, plus $4,000 spent on land with no
+extra hands to work it. `_land_worth_buying` now blocks a `BUY_LAND` that
+wouldn't raise the hire-formula's hand cap, capping this agent at 3
+quadrants outright (independent of `LAND_UTILIZATION_GATE`, which still
+gates 1->2 and 2->3, both of which *do* raise hand capacity) -- matching
+what `reference/x492_nah_i_d_win.py` (the strongest agent in the pool)
+does on its own. Recovered most of the trade-off: back within +/-7% of
+the original 0.6 baseline against every non-adversarial pool opponent
+(and still +59% against x492 vs. that baseline), and the head-to-head loss
+against `reference/main_land_gate_60pct.py` narrowed from -34% to -13%
+mean money -- better, but still a loss, so some gap remains unexplained
+(oversupply from selling faster once 3 quadrants comes sooner, and/or the
+spatial pathing bias below, are the leading suspects). Kept
+`reference/main_land_gate_60pct.py` in `scripts/pool_winrate.py`'s default
+pool to keep tracking whatever's left of this gap.
+
+**Task-driven hiring, tried and reverted**: real top-ladder replays
+(`scripts/extract_replay_tape.py`/the community episode dataset, see
+`reference/community_dataset/`) showed hand count tracking actual pending
+work turn to turn -- zero hands hired on a day with nothing to do but wait
+for wheat to grow and tend animals solo, five hired the moment a real
+backlog existed -- not the flat `2 * quadrants` formula this agent uses.
+Replaced `_build_hire_orders` with one counting actionable tiles right now
+(unwatered/harvestable plants, weeds, optionally plantable-with-seed-budget
+empty tiles) and sizing the crew to clear that backlog by
+`TASKS_PER_HAND`. It reproduced the real pattern -- hand count genuinely
+fluctuated day to day instead of stepping through fixed quadrant
+thresholds -- but measured worse in every variant tried: -3 to -6% mean
+money against the non-adversarial pool and -15% against x492 counting
+plantable tiles as tasks; dropping plantable tiles from the count (hiring
+only for water/harvest/weed maintenance) was worse still, -34% in the
+head-to-head against `reference/main_land_gate_60pct.py` (vs. -13% for the
+simple quadrant-cap formula it replaced). Both variants hired more
+aggressively during genuine backlog spikes (freshly bought land, a batch
+of crops maturing together) than the flat formula ever did, which is
+exactly the same oversupply pattern as every other "hire/produce more"
+experiment in this file's history -- more simultaneous harvests than the
+market (or the sell logic below) can absorb without crashing the price.
+Reverted to the flat formula; the real pattern is genuine, but replicating
+it costs more in oversupply than it saves in idle-hand hire fees at this
+agent's current selling strategy.
+
+**Spatial clustering (crops), addressed**: a replay showed planted tiles
+clustering heavily near the shed (the NW quadrant dense and harvest-ready,
+the NE quadrant mostly empty or gone to weed) rather than spreading evenly
+across owned land. `_find_target`'s nearest-candidate-wins selection
+created this bias -- once a unit settled into tending nearby tiles, a
+marginally-closer chore in the already-established area kept winning over
+walking further out to work distant land, even when it was sitting idle.
+`_quadrant_utilization` now tracks each quadrant's own planted fraction,
+and a fresh PLANT candidate's distance in `_find_target` gets inflated by
+`quadrant_util[q] * (board_size // 2)` -- a same-distance choice between a
+crowded and a neglected quadrant now goes to the neglected one, while a
+much-closer tile in the crowded quadrant can still win outright (it's a
+nudge on ties/near-ties, not a hard override, so it doesn't force units to
+walk past everything nearby chasing the single least-planted quadrant).
+10-seed pool comparison on top of the animal-zone fix above: win/loss
+record held (still 50/60 seeds, 83.3%, already saturated against the
+non-adversarial pool) but mean money climbed further across nearly every
+opponent -- +10 to +20% vs `random`/`starter`/`checkpoints/v0`/
+`melon_maxxer` ($36-38k -> $40-44k), +16% vs x492 despite still losing
+every seed there (its own money also grew a comparable amount, so the
+underlying land-race gap wasn't closed, just both sides scaled up).
 
 **TOMATO/STRAWBERRY**: this agent only ever grew the three one-time crops
 (MELON/WHEAT/CARROT). `data/README.md`'s Harvest Yields section documents
@@ -171,6 +432,7 @@ market closes.
 from __future__ import annotations
 
 from kaggle_environments.envs.kaggriculture.kaggriculture import (
+    ANIMALS,
     CROPS,
     LAND_ORDER,
     LAND_PRICES,
@@ -191,16 +453,47 @@ FERTILIZER_MAX_PRICE_FRAC = 1.2  # don't buy fertilizer more than 20% over base
 
 SELL_PARAMS = {
     # threshold: fraction of base price required to sell at all -- see
-    # _build_sell_orders for why there's no per-turn cap.
+    # _build_sell_orders for why there's no per-turn cap. Shared by
+    # _CropPlanner and _AnimalPlanner's own _price_ok, so a crop/animal
+    # kind's plant/build eligibility always matches its sell eligibility.
     "MELON":      {"threshold": 0.65},
     "WHEAT":      {"threshold": 0.45},
     "CARROT":     {"threshold": 0.45},
     "TOMATO":     {"threshold": 0.50},
     "STRAWBERRY": {"threshold": 0.55},
+    "MILK":       {"threshold": 0.50},
+    "WOOL":       {"threshold": 0.60},  # WOOL's above-equilibrium price shape is nearly
+                                         # as steep as MELON's, see the Price-aware
+                                         # planting note
+    "EGG":        {"threshold": 0.35},
+    "FERTILIZER": {"threshold": 0.50},  # collected free from animal structures (COLLECT_FERTILIZER)
+                                         # in excess of what crops currently need -- see the module
+                                         # docstring's Selling fertilizer note
 }
 
 SHED_CAPACITY = 100  # data/README.md default; not exposed in `obs`
 SHED_OVERFLOW_GUARD = 0.85  # start dumping regardless of price above this fraction full
+
+ANIMAL_KINDS = ("COW", "SHEEP", "GOOSE")
+ANIMAL_PRODUCT = {"COW": "MILK", "SHEEP": "WOOL", "GOOSE": "EGG"}
+ANIMAL_STRUCTURE = {"COW": "PASTURE", "SHEEP": "PASTURE", "GOOSE": "COOP"}
+ANIMAL_PRODUCTS = ("MILK", "WOOL", "EGG")  # finished products a unit carries to the shed
+ANIMAL_TARGET_SHARE = {"COW": 0.60, "SHEEP": 0.40, "GOOSE": 0.0}  # GOOSE has the
+    # lowest $/day of the three ($50: EGG base 50 / 1-day interval, vs COW's $80 and
+    # SHEEP's $66.7) despite being the cheapest to buy -- 5/5 downloaded top-ladder
+    # replays (3 different players) never place one; see the module docstring's
+    # Animal husbandry (attempt 3) note
+ANIMAL_LAND_SHARE = 0.18  # target fraction of owned tiles reserved for animal
+                          # structures -- see the module docstring's Animal husbandry
+                          # (attempt 3) note; top-ladder replays hold this steady
+                          # around 15-24% throughout the season
+ANIMAL_RESERVE = 1  # spare bought-but-not-yet-placed animal tokens to keep queued, per kind
+FEED_RESERVE_PER_ANIMAL = 2  # days of WHEAT buffer per live animal, bought directly from
+                              # the market -- see _build_feed_orders for why
+FEED_MAX_PRICE_FRAC = 5.0  # a near-nonbinding backstop, not a real cap: missing a feed
+                            # loses the whole animal ($300-500+), dwarfing even a wildly
+                            # inflated wheat price -- see the module docstring's Animal
+                            # husbandry (attempt 2) note for why a tighter cap is a trap
 
 MAX_HANDS = 6
 SAFETY_RESERVE = 300  # cash kept in reserve before optional buys/land/fertilizer
@@ -210,9 +503,9 @@ DEFAULT_EPISODE_STEPS = 720  # data/README.md defaults, used if `config` is unav
 DEFAULT_TURNS_PER_DAY = 24
 SEED_BUFFER_DAYS = 1  # a crop needs first_yield_day + this many days left to be worth planting
 LAND_CUTOFF_DAYS = 5  # stop buying new land this close to the end, it won't pay back in time
-LAND_UTILIZATION_GATE = 0.6  # don't buy the next quadrant until this much of what we
-                              # already own is planted -- see the module docstring's
-                              # Land utilization gate note
+LAND_UTILIZATION_GATE = 0.45  # don't buy the next quadrant until this much of what we
+                               # already own is planted -- see the module docstring's
+                               # Land utilization gate note
 ENDGAME_LIQUIDATION_DAYS = 2  # ignore the sell-price threshold this close to the end
 
 
@@ -239,6 +532,53 @@ def _step_toward(fx, fy, tx, ty):
 def _shed_adjacent_tiles(board_size):
     half = board_size // 2
     return {(half - 1, half - 1), (half, half - 1), (half - 1, half), (half, half)}
+
+
+def _dist_to_shed(x, y, board_size):
+    return min(abs(x - sx) + abs(y - sy) for sx, sy in _shed_adjacent_tiles(board_size))
+
+
+def _quadrant_of(x, y, board_size):
+    half = board_size // 2
+    return ("N" if y < half else "S") + ("W" if x < half else "E")
+
+
+def _quadrant_utilization(farm, board_size):
+    """Fraction of each unlocked quadrant's own tiles currently in use
+    (planted, or holding an animal structure) -- used to steer new
+    plantings toward whichever quadrant is most neglected, see the module
+    docstring's spatial clustering (crops) note. A locked quadrant's
+    utilization is irrelevant (no empty-tile candidate is ever generated
+    there, its tiles are the "LOCKED" string, not None) and defaults to 0.0
+    for the div-by-zero case, which never actually gets used."""
+    used = {"NW": 0, "NE": 0, "SW": 0, "SE": 0}
+    total = {"NW": 0, "NE": 0, "SW": 0, "SE": 0}
+    for y in range(board_size):
+        for x in range(board_size):
+            tile = farm["tiles"][y][x]
+            if tile == "LOCKED":
+                continue
+            q = _quadrant_of(x, y, board_size)
+            total[q] += 1
+            if _is_plant(tile) or (isinstance(tile, dict) and tile.get("kind") in ("PASTURE", "COOP")):
+                used[q] += 1
+    return {q: (used[q] / total[q] if total[q] else 0.0) for q in used}
+
+
+def _animal_zone(farm, board_size, needed):
+    """The `needed` empty tiles closest to the shed -- animal structures
+    claim this zone first, leaving the rest of the map free for crops to
+    spread into, instead of both competing for whichever empty tile happens
+    to be nearest the unit that finds it first. See the module docstring's
+    spatial clustering (animals) note: real top-ladder play keeps every
+    animal structure in a tight ring around the shed (FEED is daily and
+    unmissable, so a short walk there matters), with crops filling the rest
+    of the map edge-to-edge."""
+    if needed <= 0:
+        return set()
+    empties = [(x, y) for y in range(board_size) for x in range(board_size) if farm["tiles"][y][x] is None]
+    empties.sort(key=lambda p: _dist_to_shed(p[0], p[1], board_size))
+    return set(empties[:needed])
 
 
 def _is_plant(tile):
@@ -345,49 +685,219 @@ class _CropPlanner:
         return crop
 
 
-def _find_target(pos, farm, day, board_size, claimed, inv, planner, shed_tiles, want_fertilizer, liquidating):
-    """Scan the whole farm for the nearest unclaimed tile worth walking to.
+def _is_animal_tile(tile):
+    return isinstance(tile, dict) and bool(tile.get("animal"))
+
+
+def _is_empty_structure(tile):
+    return isinstance(tile, dict) and tile.get("kind") in ("PASTURE", "COOP") and not tile.get("animal")
+
+
+def _carried_animal_for(tile, inv):
+    """Which animal kind (if any) in `inv` matches this empty structure's type."""
+    for kind in ANIMAL_KINDS:
+        if ANIMAL_STRUCTURE[kind] == tile.get("kind") and inv.get(kind, 0) > 0:
+            return kind
+    return None
+
+
+class _AnimalPlanner:
+    """Tracks, for one turn, which animal kind to build a structure for or
+    fetch from the shed next -- mirrors _CropPlanner's price-aware,
+    share-balancing logic. Unlike attempt 2 (see the module docstring's
+    Animal husbandry notes), capacity is sized as a target *fraction of
+    owned land* (`ANIMAL_LAND_SHARE`), not a fixed hand allocation, and any
+    unit -- farmer or hand -- may act on an animal task; there's no
+    animal-only crew. `wants_structure`/`wants_pickup` are read-only (safe
+    during candidate scanning in _find_target); `choose_structure`/
+    `choose_pickup` mutate reserve counters, so only call them once a unit
+    is actually standing on the tile it's about to act on."""
+
+    def __init__(self, farm, shed, prices):
+        self.counts = {kind: 0 for kind in ANIMAL_KINDS}
+        self.empty_structures = {"PASTURE": 0, "COOP": 0}
+        unlocked_tiles = 0
+        for row in farm["tiles"]:
+            for tile in row:
+                if tile == "LOCKED":
+                    continue
+                unlocked_tiles += 1
+                if not (isinstance(tile, dict) and tile.get("kind") in ("PASTURE", "COOP")):
+                    continue
+                animal = tile.get("animal")
+                if animal:
+                    self.counts[animal] += 1
+                else:
+                    self.empty_structures[tile["kind"]] += 1
+        self.total = sum(self.counts.values()) or 1
+        self.shed = dict(shed)
+        self.prices = prices or {}
+        self.target = round(unlocked_tiles * ANIMAL_LAND_SHARE)
+
+    def _committed(self):
+        return sum(self.counts.values()) + sum(self.empty_structures.values())
+
+    def remaining_structures(self):
+        """How many more structures still need to be built to reach the
+        land-share target -- used to size the near-shed zone _animal_zone
+        reserves, not to decide whether to build (choose_structure/
+        wants_structure remain the source of truth for that)."""
+        return max(0, self.target - self._committed())
+
+    def _price_ok(self, kind):
+        product = ANIMAL_PRODUCT[kind]
+        price = self.prices.get(product)
+        if price is None:
+            return True
+        base = MARKET_PARAMS[product]["base"]
+        return price >= base * SELL_PARAMS[product]["threshold"]
+
+    def wants_structure(self):
+        if self._committed() >= self.target:
+            return False
+        return any(self.empty_structures[ANIMAL_STRUCTURE[k]] == 0 for k in ANIMAL_KINDS)
+
+    def wants_pickup(self):
+        return any(
+            self.empty_structures[ANIMAL_STRUCTURE[k]] > 0 and self.shed.get(k, 0) > 0 for k in ANIMAL_KINDS
+        )
+
+    def choose_structure(self):
+        """Pick a kind with no spare (built-but-empty) structure yet, preferring
+        whichever affordable, currently-worth-selling kind is furthest below
+        its target mix share -- same fallback as _CropPlanner.choose().
+        Excludes kinds with a 0 target share (a "structure type has zero
+        spares" check alone would otherwise let a 0-share kind win as soon
+        as its structure type is the only one with no spare waiting --
+        checked at the module docstring's Animal husbandry (attempt 3) note
+        after that let GOOSE keep getting built despite a 0 target share)."""
+        if self._committed() >= self.target:
+            return None
+        needing = [
+            k for k in ANIMAL_KINDS
+            if ANIMAL_TARGET_SHARE[k] > 0 and self.empty_structures[ANIMAL_STRUCTURE[k]] == 0
+        ]
+        if not needing:
+            return None
+        pool = [k for k in needing if self._price_ok(k)] or needing
+        kind = min(pool, key=lambda k: self.counts[k] / self.total - ANIMAL_TARGET_SHARE[k])
+        self.empty_structures[ANIMAL_STRUCTURE[kind]] += 1  # reserve so two units don't both build one
+        return kind
+
+    def choose_pickup(self):
+        """Pick a kind that already has a spare structure waiting AND a
+        bought token sitting in the shed."""
+        ready = [
+            k for k in ANIMAL_KINDS
+            if ANIMAL_TARGET_SHARE[k] > 0
+            and self.empty_structures[ANIMAL_STRUCTURE[k]] > 0
+            and self.shed.get(k, 0) > 0
+        ]
+        if not ready:
+            return None
+        pool = [k for k in ready if self._price_ok(k)] or ready
+        kind = min(pool, key=lambda k: self.counts[k] / self.total - ANIMAL_TARGET_SHARE[k])
+        self.empty_structures[ANIMAL_STRUCTURE[kind]] -= 1  # reserve so two units don't grab the same slot
+        self.shed[kind] = self.shed.get(kind, 0) - 1
+        return kind
+
+
+def _find_target(
+    pos, farm, day, board_size, claimed, inv, planner, animal_planner, shed_tiles,
+    want_fertilizer, shed_wheat_available, liquidating, animal_zone, quadrant_util,
+):
+    """Scan the whole farm for the nearest (or, for a fresh planting,
+    nearest-adjusted-for-quadrant-balance -- see below) unclaimed tile worth
+    walking to, across both crops and animals -- one shared crew, one shared
+    priority order, so a unit works whichever is more urgent right now
+    instead of being permanently assigned to one or the other (see the
+    module docstring's Animal husbandry (attempt 3) note).
 
     `liquidating` (close to the last day, see the module docstring's Endgame
     liquidation note) swaps water's and shed-return's priority: watering a
     crop that won't finish growing in time is wasted effort, while getting
     already-harvested produce into the shed guarantees it can still be sold.
+
+    Every candidate carries a precomputed `sort_dist` (its 4th field) rather
+    than the sort key recomputing raw distance uniformly: a fresh PLANT
+    candidate gets its raw distance inflated by how utilized its quadrant
+    already is (`quadrant_util`), nudging new plantings toward whichever
+    quadrant is most neglected instead of always the literal nearest empty
+    tile -- see the module docstring's spatial clustering (crops) note. Every
+    other candidate type keeps plain, unadjusted distance.
     """
     fx, fy = pos
     water_priority = 5 if liquidating else 1
     shed_priority = 1 if liquidating else 5
+    spread_penalty = board_size // 2  # scale of the quadrant-balance nudge, in tiles
     candidates = []
+    any_unfed = False
     for y in range(board_size):
         for x in range(board_size):
             if (x, y) in claimed:
                 continue
             tile = farm["tiles"][y][x]
+            dist = abs(x - fx) + abs(y - fy)
             if _is_plant(tile):
                 if _is_harvestable(tile, day):
-                    candidates.append((x, y, 0))  # harvest
+                    candidates.append((x, y, 0, dist))  # harvest
                 elif not tile["watered_today"]:
-                    candidates.append((x, y, water_priority))
+                    candidates.append((x, y, water_priority, dist))
                 elif inv.get("FERTILIZER", 0) > 0 and _is_fertilizable(tile, day):
-                    candidates.append((x, y, 3))  # deliver fertilizer
+                    candidates.append((x, y, 3, dist))  # deliver fertilizer
             elif _is_weed(tile):
-                candidates.append((x, y, 2))  # clear a weed to reclaim the tile
-            elif tile is None and planner.has_plantable():
-                candidates.append((x, y, 4))  # plant
+                candidates.append((x, y, 2, dist))  # clear a weed to reclaim the tile
+            elif _is_animal_tile(tile):
+                if tile.get("yield_units", 0) > 0:
+                    candidates.append((x, y, 0, dist))  # harvest animal product
+                elif not tile.get("fed_today"):
+                    any_unfed = True
+                    if inv.get("WHEAT", 0) > 0:
+                        candidates.append((x, y, -1, dist))  # feed -- more urgent than
+                                                               # anything; 2 misses = the
+                                                               # animal escapes
+                elif tile.get("fertilizer_available"):
+                    candidates.append((x, y, 3, dist))  # collect fertilizer
+                elif not tile.get("cared_today"):
+                    candidates.append((x, y, 3, dist))  # care (free next-yield bonus)
+            elif _is_empty_structure(tile) and _carried_animal_for(tile, inv):
+                candidates.append((x, y, 0, dist))  # place a carried animal -- don't leave it idle
+            elif tile is None:
+                if (x, y) in animal_zone:
+                    candidates.append((x, y, 4, dist))  # reserved for an animal structure
+                elif planner.has_plantable():
+                    q = _quadrant_of(x, y, board_size)
+                    candidates.append((x, y, 4, dist + quadrant_util[q] * spread_penalty))  # plant
+                elif animal_planner.wants_structure():
+                    candidates.append((x, y, 4, dist))  # build a structure (overflow beyond the zone)
 
-    carrying_produce = any(k != "FERTILIZER" and n > 0 for k, n in inv.items())
+    carrying_produce = any(
+        n > 0 and k not in ("WHEAT", *ANIMAL_KINDS) and (k != "FERTILIZER" or not want_fertilizer)
+        for k, n in inv.items()
+    )
     needs_fertilizer = inv.get("FERTILIZER", 0) == 0 and want_fertilizer
-    if carrying_produce or needs_fertilizer:
+    needs_wheat = inv.get("WHEAT", 0) <= 0 and any_unfed and shed_wheat_available
+    needs_animal_pickup = animal_planner.wants_pickup() and not any(inv.get(k, 0) > 0 for k in ANIMAL_KINDS)
+    if carrying_produce or needs_fertilizer or needs_wheat or needs_animal_pickup:
+        priority = -1 if needs_wheat else shed_priority
         for (sx, sy) in shed_tiles:
             if (sx, sy) not in claimed:
-                candidates.append((sx, sy, shed_priority))  # return to shed
+                candidates.append((sx, sy, priority, abs(sx - fx) + abs(sy - fy)))  # return to shed
 
     if not candidates:
         return None
-    candidates.sort(key=lambda c: (c[2], abs(c[0] - fx) + abs(c[1] - fy)))
+    candidates.sort(key=lambda c: (c[2], c[3]))
     return candidates[0]
 
 
-def _decide_unit(pos, inv, farm, private, day, board_size, claimed, planner, shed_tiles, want_fertilizer, liquidating):
+def _build_action(kind):
+    return ["BUILD_COOP" if ANIMAL_STRUCTURE[kind] == "COOP" else "BUILD_PASTURE"]
+
+
+def _decide_unit(
+    pos, inv, farm, private, day, board_size, claimed, planner, animal_planner, shed_tiles,
+    want_fertilizer, liquidating, animal_zone, quadrant_util,
+):
     fx, fy = pos
     tile = farm["tiles"][fy][fx]
 
@@ -406,22 +916,71 @@ def _decide_unit(pos, inv, farm, private, day, board_size, claimed, planner, she
         claimed.add((fx, fy))
         return ["DIG"]
 
+    if _is_animal_tile(tile):
+        if tile.get("yield_units", 0) > 0:
+            claimed.add((fx, fy))
+            return ["HARVEST"]
+        if not tile.get("fed_today") and inv.get("WHEAT", 0) > 0:
+            claimed.add((fx, fy))
+            return ["FEED"]
+        if tile.get("fertilizer_available"):
+            claimed.add((fx, fy))
+            return ["COLLECT_FERTILIZER"]
+        if not tile.get("cared_today"):
+            claimed.add((fx, fy))
+            return ["CARE"]
+
+    if _is_empty_structure(tile):
+        kind = _carried_animal_for(tile, inv)
+        if kind:
+            claimed.add((fx, fy))
+            return ["PLACE", kind]
+
     if (fx, fy) in shed_tiles:
-        carried_produce = {k: n for k, n in inv.items() if k != "FERTILIZER" and n > 0}
+        carried_product = {k: n for k, n in inv.items() if k in ANIMAL_PRODUCTS and n > 0}
+        if carried_product:
+            claimed.add((fx, fy))
+            item, n = next(iter(carried_product.items()))
+            return ["PLACE", item, n]
+        carried_produce = {
+            k: n for k, n in inv.items()
+            if n > 0 and k not in ("WHEAT", *ANIMAL_KINDS) and (k != "FERTILIZER" or not want_fertilizer)
+        }
         if carried_produce:
             claimed.add((fx, fy))
             return ["DROP"]
         if inv.get("FERTILIZER", 0) == 0 and want_fertilizer and private["shed"].get("FERTILIZER", 0) > 0:
             claimed.add((fx, fy))
             return ["PICKUP", "FERTILIZER", 1]
+        if inv.get("WHEAT", 0) <= 0 and private["shed"].get("WHEAT", 0) > 0:
+            claimed.add((fx, fy))
+            return ["PICKUP", "WHEAT", min(4, private["shed"]["WHEAT"])]
+        if not any(inv.get(k, 0) > 0 for k in ANIMAL_KINDS):
+            kind = animal_planner.choose_pickup()
+            if kind:
+                claimed.add((fx, fy))
+                return ["PICKUP", kind, 1]
 
     if tile is None:
+        if (fx, fy) in animal_zone:
+            kind = animal_planner.choose_structure()
+            if kind:
+                claimed.add((fx, fy))
+                return _build_action(kind)
         crop = planner.choose()
         if crop:
             claimed.add((fx, fy))
             return ["PLANT", crop]
+        kind = animal_planner.choose_structure()
+        if kind:
+            claimed.add((fx, fy))
+            return _build_action(kind)
 
-    target = _find_target(pos, farm, day, board_size, claimed, inv, planner, shed_tiles, want_fertilizer, liquidating)
+    shed_wheat_available = private["shed"].get("WHEAT", 0) > 0
+    target = _find_target(
+        pos, farm, day, board_size, claimed, inv, planner, animal_planner, shed_tiles,
+        want_fertilizer, shed_wheat_available, liquidating, animal_zone, quadrant_util,
+    )
     if target:
         claimed.add((target[0], target[1]))
         step = _step_toward(fx, fy, target[0], target[1])
@@ -457,15 +1016,34 @@ def _build_sell_orders(shed, prices, days_remaining):
     return orders
 
 
+def _hands_target(quadrants):
+    return min(MAX_HANDS, 2 * quadrants)
+
+
+def _land_worth_buying(quadrants_now):
+    """The next quadrant only pays for itself if it actually raises hire
+    capacity -- see the module docstring's Land utilization gate note. The
+    hire formula (2*quadrants, capped at MAX_HANDS) hits its ceiling at
+    quadrants_now == MAX_HANDS // 2 (3, at the default MAX_HANDS=6); a
+    replay showed the same MAX_HANDS=6 hands spread across a 4th quadrant's
+    extra land planting no more tiles in absolute terms than 3 quadrants'
+    worth -- just diluted thinner, plus the quadrant's own price wasted."""
+    return _hands_target(quadrants_now + 1) > _hands_target(quadrants_now)
+
+
 def _build_land_orders(farm, days_remaining):
     if days_remaining < LAND_CUTOFF_DAYS:
         return []  # a fresh quadrant can't earn back its cost this close to the end
-    n_extra = len(farm["unlocked_quadrants"]) - 1  # NW is always owned
-    if n_extra >= len(LAND_ORDER):
+    quadrants_now = len(farm["unlocked_quadrants"])
+    n_extra = quadrants_now - 1  # NW is always owned
+    if n_extra >= len(LAND_ORDER) or not _land_worth_buying(quadrants_now):
         return []
     unlocked = [tile for row in farm["tiles"] for tile in row if tile != "LOCKED"]
-    planted = sum(1 for tile in unlocked if _is_plant(tile))
-    if unlocked and planted / len(unlocked) < LAND_UTILIZATION_GATE:
+    used = sum(
+        1 for tile in unlocked
+        if _is_plant(tile) or (isinstance(tile, dict) and tile.get("kind") in ("PASTURE", "COOP"))
+    )
+    if unlocked and used / len(unlocked) < LAND_UTILIZATION_GATE:
         return []  # can't staff what we already own -- more land would just sit idle
     if farm["money"] - SAFETY_RESERVE >= LAND_PRICES[n_extra]:
         return [["BUY_LAND"]]
@@ -473,7 +1051,7 @@ def _build_land_orders(farm, days_remaining):
 
 
 def _build_hire_orders(farm):
-    desired = min(MAX_HANDS, 2 * len(farm["unlocked_quadrants"]))
+    desired = _hands_target(len(farm["unlocked_quadrants"]))
     remaining = desired - farm["hires_today"]
     if remaining <= 0:
         return []
@@ -510,6 +1088,75 @@ def _build_fertilizer_orders(private, prices, money):
     return [["BUY_PRODUCT", "FERTILIZER", 1]]
 
 
+def _build_feed_orders(farm, private, prices, money):
+    """Buy WHEAT directly from the market for animal feed, decoupled from
+    the crop side's own WHEAT production/selling. Without this, animals
+    starve even with plenty of attention: `_build_sell_orders` dumps every
+    WHEAT harvest as soon as its price clears the sell threshold, so the
+    shed can sit at 0 WHEAT for turns at a stretch -- see the module
+    docstring's Animal husbandry (attempt 2) note. Placed ahead of
+    `_build_seed_orders` in `agent()`'s market list: missing a seed buy
+    delays a planting one turn, missing a feed loses the whole animal."""
+    live = sum(
+        1 for row in farm["tiles"] for tile in row
+        if isinstance(tile, dict) and tile.get("kind") in ("PASTURE", "COOP") and tile.get("animal")
+    )
+    if live == 0:
+        return []
+    reserve = live * FEED_RESERVE_PER_ANIMAL
+    have = private.get("shed", {}).get("WHEAT", 0)
+    needed = reserve - have
+    if needed <= 0:
+        return []
+    base = MARKET_PARAMS["WHEAT"]["base"]
+    price = prices.get("WHEAT", base)
+    if price > base * FEED_MAX_PRICE_FRAC:
+        return []
+    remaining = money - SAFETY_RESERVE
+    orders = []
+    while needed > 0 and remaining >= price:
+        orders.append(["BUY_PRODUCT", "WHEAT", 1])
+        remaining -= price
+        needed -= 1
+    return orders
+
+
+def _build_animal_orders(farm, private, money):
+    """Keep at most ANIMAL_RESERVE bought-but-unplaced tokens per kind in
+    the shed so a unit always has something to grab -- mirrors
+    _build_seed_orders. Capped against the same land-share target
+    _AnimalPlanner uses, counted by *live animals* (not structures --
+    BUILD_PASTURE/BUILD_COOP is a free action, so structures reach the
+    target well before purchases can catch up; counting empty structures
+    as already "committed" here stopped this from ever buying enough
+    animals to fill them, leaving land built but empty for the rest of the
+    season)."""
+    orders = []
+    shed = private.get("shed", {})
+    unlocked_tiles = sum(1 for row in farm["tiles"] for tile in row if tile != "LOCKED")
+    target = round(unlocked_tiles * ANIMAL_LAND_SHARE)
+    committed = sum(shed.get(kind, 0) for kind in ANIMAL_KINDS)
+    committed += sum(
+        1 for row in farm["tiles"] for tile in row
+        if isinstance(tile, dict) and tile.get("kind") in ("PASTURE", "COOP") and tile.get("animal")
+    )
+    remaining = money - SAFETY_RESERVE
+    for kind in ANIMAL_KINDS:
+        if ANIMAL_TARGET_SHARE[kind] <= 0:
+            continue  # e.g. GOOSE -- see ANIMAL_TARGET_SHARE's own comment
+        if committed >= target:
+            break
+        if shed.get(kind, 0) >= ANIMAL_RESERVE:
+            continue
+        cost = ANIMALS[kind]["cost"]
+        if remaining < cost:
+            continue
+        orders.append(["BUY_ANIMAL", kind, 1])
+        remaining -= cost
+        committed += 1
+    return orders
+
+
 def agent(obs, config=None):
     player = obs.get("player", 0)
     farms = obs.get("farms", [])
@@ -535,6 +1182,9 @@ def agent(obs, config=None):
 
     want_fertilizer = _any_fertilizable(farm, day)
     planner = _CropPlanner(private, farm, days_remaining, market_prices)
+    animal_planner = _AnimalPlanner(farm, shed, market_prices)
+    animal_zone = _animal_zone(farm, board_size, animal_planner.remaining_structures())
+    quadrant_util = _quadrant_utilization(farm, board_size)
 
     claimed = set()
     units = [farm["farmer"]] + list(farm["hands"])
@@ -548,9 +1198,12 @@ def agent(obs, config=None):
             board_size,
             claimed,
             planner,
+            animal_planner,
             shed_tiles,
             want_fertilizer,
             liquidating,
+            animal_zone,
+            quadrant_util,
         )
         for i, pos in enumerate(units)
     ]
@@ -560,8 +1213,10 @@ def agent(obs, config=None):
     market += _build_sell_orders(shed, market_prices, days_remaining)
     market += _build_land_orders(farm, days_remaining)
     market += _build_hire_orders(farm)
+    market += _build_feed_orders(farm, private, market_prices, farm["money"])
     market += _build_seed_orders(seeds, farm["money"], days_remaining)
     market += _build_fertilizer_orders(private, market_prices, farm["money"])
+    market += _build_animal_orders(farm, private, farm["money"])
     market = market[:MAX_MARKET_ORDERS]
 
     return {"farmer": farmer_action, "hands": hands_actions, "market": market}
