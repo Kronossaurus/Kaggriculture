@@ -248,6 +248,37 @@ Plausibly compounds with the pre-existing tile-clustering gap below (which
 remains unaddressed -- this only reserves land for animals, it doesn't
 spread crops outward on its own).
 
+**Animal capacity vs crop capacity**: a downloaded replay of this agent's
+own 2026-08-18 submission (won 42,321 vs 39,457, but by less than it
+should have) showed why: `ANIMAL_LAND_SHARE` sizes the animal-structure
+target purely off land owned, with no regard for how many units exist to
+tend both the animals *and* the crops. By day 20 (3 quadrants, 75 tiles)
+the target had grown to 14 animal structures against a crew of only 7
+units (farmer + `MAX_HANDS`'s 6 hands) -- and crop upkeep visibly
+collapsed under the load: NW's planted-tile count fell from ~17 (day 12)
+to 2-3 (day 28), and NE accumulated 3-4 weeds that were never cleared for
+the rest of the season. The same replay showed only 2 hands hired on day
+0-6 (the flat `2 * quadrants` formula, correctly sized for 1 quadrant) even
+though the land-share target already wanted 4-5 animal structures by day
+2 -- not a hiring bug, the animal side was simply sized without reference
+to how few hands existed yet to run it. Fixed with `_animal_target`, which
+now caps the live-animal count at the *smaller* of the land-share target
+and `ANIMAL_MAX_PER_UNIT` per currently-hired farmer/hand (shared by
+`_AnimalPlanner` and `_build_animal_orders` so both always agree).
+`ANIMAL_MAX_PER_UNIT` started at 1.0 tiles/unit as a first guess pending
+pool validation -- see whether that number changed below. This also
+substantially resolved the spatial-clustering "drift" gap noted above
+without any change to `_animal_zone` itself: a local same-code replay (30
+days vs `starter`) that previously would have grown to a much larger
+target now ends the game with 7 structures instead of 14, and their max
+distance from the shed dropped from 6 tiles to 4 (3 of 7 sit directly on
+the shed ring). Smaller total target simply means `_animal_zone` never has
+to reach as far to find its N-closest empty tiles. The same replay's crop
+health held up far better too -- NW stayed at 15-17 planted tiles through
+day 20 instead of collapsing to 2-3 by day 28. Didn't pursue a dedicated
+anticipatory-reservation fix for the residual drift given how much smaller
+it already is; revisit only if a future replay still shows it mattering.
+
 **Price-aware planting**: MELON's price curve is punished quadratically for
 oversupply above equilibrium (`data/README.md`'s Price Function, the `sq`
 above-target shape -- the steepest in the whole table) and only recovers
@@ -261,6 +292,25 @@ its current price is below the same threshold `_build_sell_orders` already
 uses to decide whether to sell it, falling back to ignoring price only if
 every plantable crop is currently depressed (so land never sits idle over
 a temporary dip).
+
+**Price-attractiveness-aware planting**: `_price_ok` above is a binary
+pass/fail gate, and once a crop clears it, price stopped mattering at all
+-- `choose` picked purely by target-mix-share gap. A downloaded replay of
+this agent's own 2026-08-18 submission showed the real cost of that: by
+day 17-18, STRAWBERRY's price had climbed to 2.0-2.1x its base (well above
+its 0.55 sell threshold) while MELON sat at ~0.98x its own base (barely
+above its 0.65 threshold) -- and MELON still got planted *more* often than
+STRAWBERRY in that window, because MELON's dominant 45% target share gives
+it a bigger raw share-gap almost by construction, drowning out how much
+more attractive STRAWBERRY's price actually was right then. `_CropPlanner`
+now scores each candidate crop by its target-share gap *minus*
+`PRICE_ATTRACTIVENESS_WEIGHT * (price / base - 1)` (see `_score`), so a
+crop trading well above its base price gets pulled toward the front of the
+queue instead of only ever competing on mix-share alone.
+`PRICE_ATTRACTIVENESS_WEIGHT` started at 0.1 as a first guess -- see the
+Land utilization gate's "nudged back up" note below for the combined
+10-seed pool result (this, the gate bump, and the fertilizer-liquidation
+fix below were all measured together in one pass, not in isolation).
 
 **Land utilization gate**: `_build_land_orders` used to buy the next
 quadrant purely on cash available, with no regard for whether the land
@@ -325,6 +375,26 @@ mean money -- better, but still a loss, so some gap remains unexplained
 spatial pathing bias below, are the leading suspects). Kept
 `reference/main_land_gate_60pct.py` in `scripts/pool_winrate.py`'s default
 pool to keep tracking whatever's left of this gap.
+
+**The gate nudged back up, slightly**: a downloaded replay of this agent's
+own 2026-08-18 submission showed the 3rd quadrant bought at exactly 46%
+utilization of the first two -- technically past the 0.45 gate, but by a
+margin thin enough to read as "barely earned it" rather than genuinely
+ready. Raised to 0.50: still comfortably below the ~48-56% achievable-
+utilization ceiling observed in real replays (where 0.6 deadlocked), just
+less borderline than 0.45. 10-seed pool comparison with this, the price-
+attractiveness change above, and the fertilizer-liquidation fix below all
+bundled into one pass (not isolated per-change): a mixed, honest result --
+mean money against the non-adversarial pool *dipped* modestly (e.g.
+`random` $60.5k -> $56.1k, `starter` $59.7k -> $51.9k), within the range
+of this project's known run-to-run variance at a fixed seed count, but the
+head-to-head against `reference/main_fertilizer_selling_submitted_
+20260817.py` (yesterday's actual Kaggle submission) improved from 6/10 to
+8/10 seeds won, and the money ratio against it from 1.05x to 1.19x. POOL
+TOTAL win count also ticked up (56/70 -> 58/70). Read cautiously: three
+changes landed in one measurement, so this doesn't isolate which of them
+(if any) is pulling the weak-pool number down -- worth re-splitting and
+re-measuring individually if a future session revisits this area.
 
 **Task-driven hiring, tried and reverted**: real top-ladder replays
 (`scripts/extract_replay_tape.py`/the community episode dataset, see
@@ -427,6 +497,26 @@ time left, has units prioritize walking harvested produce back to the shed
 over watering a crop that won't finish in time, and drops the sell-price
 threshold entirely so nothing is still sitting unsold when the last turn's
 market closes.
+
+**Endgame liquidation (fertilizer)**: the above wasn't catching everything.
+A downloaded replay of this agent's own 2026-08-18 submission showed
+real, steady dollar value sitting in unit inventories all game long (not
+growing unboundedly, just a persistent "in transit" pipeline -- WHEAT
+reserved for feed, FERTILIZER en route to a crop, freshly harvested animal
+products not yet dropped off) -- roughly $3,500-4,500 worth at any given
+sampled turn, including the very last one, where it's permanently lost
+(doesn't count toward the score). Some of that is an unavoidable tail cost
+of any continuous-production pipeline that has to stop somewhere mid-
+cycle, but the FERTILIZER slice of it wasn't: once `liquidating`, a unit
+would still walk to the shed to fetch *more* FERTILIZER for a crop that,
+by definition, has little season left to benefit from it -- a pure waste
+of travel time this late. Fixed by gating new fertilizer-delivery pickups
+on `not liquidating`, and letting already-carried FERTILIZER count as
+sellable "produce" once liquidating even if some crop is nominally still
+fertilizable (see `_find_target`'s `carrying_produce`/`_decide_unit`'s
+`carried_produce`). WHEAT's feed reserve is deliberately left untouched --
+missing a feed this late still loses the whole animal outright, a bigger
+loss than the travel time saved.
 """
 
 from __future__ import annotations
@@ -446,6 +536,10 @@ from kaggle_environments.envs.kaggriculture.kaggriculture import (
 CASH_CROPS = ("MELON", "WHEAT", "CARROT", "TOMATO", "STRAWBERRY")
 CROP_TARGET_SHARE = {"MELON": 0.45, "WHEAT": 0.25, "CARROT": 0.15, "TOMATO": 0.10, "STRAWBERRY": 0.05}
 FERTILIZE_CROPS = {"WHEAT", "CARROT", "TOMATO", "STRAWBERRY"}
+PRICE_ATTRACTIVENESS_WEIGHT = 0.1  # how much a crop's current price (as a ratio of its
+                                    # base) pulls _CropPlanner.choose() toward it, on top
+                                    # of the target-mix-share gap -- see the module
+                                    # docstring's Price-attractiveness-aware planting note
 
 SEED_RESERVE = {"MELON": 3, "WHEAT": 3, "CARROT": 3, "TOMATO": 2, "STRAWBERRY": 2}
 FERTILIZER_RESERVE = 2
@@ -487,6 +581,11 @@ ANIMAL_LAND_SHARE = 0.18  # target fraction of owned tiles reserved for animal
                           # structures -- see the module docstring's Animal husbandry
                           # (attempt 3) note; top-ladder replays hold this steady
                           # around 15-24% throughout the season
+ANIMAL_MAX_PER_UNIT = 1.0  # hard cap on live animals, per farmer/hand currently hired --
+                            # see the module docstring's Animal capacity vs crop capacity
+                            # note. ANIMAL_LAND_SHARE alone grows with quadrants bought
+                            # regardless of crew size, letting the animal count outgrow
+                            # what the same crew can also water/harvest/weed for
 ANIMAL_RESERVE = 1  # spare bought-but-not-yet-placed animal tokens to keep queued, per kind
 FEED_RESERVE_PER_ANIMAL = 2  # days of WHEAT buffer per live animal, bought directly from
                               # the market -- see _build_feed_orders for why
@@ -503,9 +602,11 @@ DEFAULT_EPISODE_STEPS = 720  # data/README.md defaults, used if `config` is unav
 DEFAULT_TURNS_PER_DAY = 24
 SEED_BUFFER_DAYS = 1  # a crop needs first_yield_day + this many days left to be worth planting
 LAND_CUTOFF_DAYS = 5  # stop buying new land this close to the end, it won't pay back in time
-LAND_UTILIZATION_GATE = 0.45  # don't buy the next quadrant until this much of what we
+LAND_UTILIZATION_GATE = 0.50  # don't buy the next quadrant until this much of what we
                                # already own is planted -- see the module docstring's
-                               # Land utilization gate note
+                               # Land utilization gate note. Still below the ~48-56%
+                               # achievable-utilization ceiling observed in real replays
+                               # (0.6 deadlocked against it), just less borderline than 0.45
 ENDGAME_LIQUIDATION_DAYS = 2  # ignore the sell-price threshold this close to the end
 
 
@@ -669,16 +770,34 @@ class _CropPlanner:
         base = MARKET_PARAMS[crop]["base"]
         return price >= base * SELL_PARAMS[crop]["threshold"]
 
+    def _score(self, crop):
+        """Lower (more negative) wins the min() in choose(): how far below
+        its target mix share this crop sits, pulled further negative (more
+        attractive) the further its current price sits above base. Without
+        this, `_price_ok` is the only place price enters the decision at
+        all, and it's a binary pass/fail -- a crop barely above threshold
+        and one at 2x its base price score identically once both clear the
+        gate, so a small-target-share crop at a genuinely great price still
+        loses to a big-target-share crop merely above threshold. See the
+        module docstring's Price-attractiveness-aware planting note."""
+        gap = self.counts[crop] / self.total - CROP_TARGET_SHARE[crop]
+        price = self.prices.get(crop)
+        if price is None:
+            return gap
+        price_ratio = price / MARKET_PARAMS[crop]["base"]
+        return gap - PRICE_ATTRACTIVENESS_WEIGHT * (price_ratio - 1)
+
     def choose(self):
-        """Pick whichever affordable, currently-worth-selling crop is
-        furthest below its target mix share. Falls back to ignoring price
-        if every plantable crop is currently depressed, so land never sits
-        idle over a temporary dip."""
+        """Pick whichever affordable, currently-worth-selling crop scores
+        lowest (see _score: furthest below its target mix share, weighted
+        by how attractive its current price is). Falls back to ignoring
+        price eligibility if every plantable crop is currently depressed,
+        so land never sits idle over a temporary dip."""
         available = [c for c in self.plantable_crops if self.seed_budget.get(c, 0) > 0]
         if not available:
             return None
         pool = [c for c in available if self._price_ok(c)] or available
-        crop = min(pool, key=lambda c: self.counts[c] / self.total - CROP_TARGET_SHARE[c])
+        crop = min(pool, key=self._score)
         self.seed_budget[crop] -= 1
         self.counts[crop] += 1
         self.total += 1
@@ -701,6 +820,24 @@ def _carried_animal_for(tile, inv):
     return None
 
 
+def _animal_target(farm):
+    """Target live-animal count -- the smaller of a land-share target
+    (ANIMAL_LAND_SHARE fraction of owned tiles) and a crew-capacity target
+    (ANIMAL_MAX_PER_UNIT per farmer/hand currently hired). A real replay
+    showed the land-share target alone growing past what the crew could
+    also keep up with on the crop side: by day 20-28 (3 quadrants, ~$40k
+    game) animal structures reached 14 while the same crew's planted tile
+    count collapsed from ~17 to ~2-3 and weeds went uncleared for the rest
+    of the season -- see the module docstring's Animal capacity vs crop
+    capacity note. Shared by _AnimalPlanner and _build_animal_orders so
+    both always agree on the same cap."""
+    unlocked_tiles = sum(1 for row in farm["tiles"] for tile in row if tile != "LOCKED")
+    land_target = round(unlocked_tiles * ANIMAL_LAND_SHARE)
+    total_units = 1 + len(farm["hands"])  # farmer + hands
+    capacity_target = round(total_units * ANIMAL_MAX_PER_UNIT)
+    return min(land_target, capacity_target)
+
+
 class _AnimalPlanner:
     """Tracks, for one turn, which animal kind to build a structure for or
     fetch from the shed next -- mirrors _CropPlanner's price-aware,
@@ -716,12 +853,8 @@ class _AnimalPlanner:
     def __init__(self, farm, shed, prices):
         self.counts = {kind: 0 for kind in ANIMAL_KINDS}
         self.empty_structures = {"PASTURE": 0, "COOP": 0}
-        unlocked_tiles = 0
         for row in farm["tiles"]:
             for tile in row:
-                if tile == "LOCKED":
-                    continue
-                unlocked_tiles += 1
                 if not (isinstance(tile, dict) and tile.get("kind") in ("PASTURE", "COOP")):
                     continue
                 animal = tile.get("animal")
@@ -732,7 +865,7 @@ class _AnimalPlanner:
         self.total = sum(self.counts.values()) or 1
         self.shed = dict(shed)
         self.prices = prices or {}
-        self.target = round(unlocked_tiles * ANIMAL_LAND_SHARE)
+        self.target = _animal_target(farm)
 
     def _committed(self):
         return sum(self.counts.values()) + sum(self.empty_structures.values())
@@ -872,10 +1005,10 @@ def _find_target(
                     candidates.append((x, y, 4, dist))  # build a structure (overflow beyond the zone)
 
     carrying_produce = any(
-        n > 0 and k not in ("WHEAT", *ANIMAL_KINDS) and (k != "FERTILIZER" or not want_fertilizer)
+        n > 0 and k not in ("WHEAT", *ANIMAL_KINDS) and (k != "FERTILIZER" or not want_fertilizer or liquidating)
         for k, n in inv.items()
     )
-    needs_fertilizer = inv.get("FERTILIZER", 0) == 0 and want_fertilizer
+    needs_fertilizer = inv.get("FERTILIZER", 0) == 0 and want_fertilizer and not liquidating
     needs_wheat = inv.get("WHEAT", 0) <= 0 and any_unfed and shed_wheat_available
     needs_animal_pickup = animal_planner.wants_pickup() and not any(inv.get(k, 0) > 0 for k in ANIMAL_KINDS)
     if carrying_produce or needs_fertilizer or needs_wheat or needs_animal_pickup:
@@ -944,12 +1077,16 @@ def _decide_unit(
             return ["PLACE", item, n]
         carried_produce = {
             k: n for k, n in inv.items()
-            if n > 0 and k not in ("WHEAT", *ANIMAL_KINDS) and (k != "FERTILIZER" or not want_fertilizer)
+            if n > 0 and k not in ("WHEAT", *ANIMAL_KINDS)
+            and (k != "FERTILIZER" or not want_fertilizer or liquidating)
         }
         if carried_produce:
             claimed.add((fx, fy))
             return ["DROP"]
-        if inv.get("FERTILIZER", 0) == 0 and want_fertilizer and private["shed"].get("FERTILIZER", 0) > 0:
+        if (
+            inv.get("FERTILIZER", 0) == 0 and want_fertilizer and not liquidating
+            and private["shed"].get("FERTILIZER", 0) > 0
+        ):
             claimed.add((fx, fy))
             return ["PICKUP", "FERTILIZER", 1]
         if inv.get("WHEAT", 0) <= 0 and private["shed"].get("WHEAT", 0) > 0:
@@ -1133,8 +1270,7 @@ def _build_animal_orders(farm, private, money):
     season)."""
     orders = []
     shed = private.get("shed", {})
-    unlocked_tiles = sum(1 for row in farm["tiles"] for tile in row if tile != "LOCKED")
-    target = round(unlocked_tiles * ANIMAL_LAND_SHARE)
+    target = _animal_target(farm)
     committed = sum(shed.get(kind, 0) for kind in ANIMAL_KINDS)
     committed += sum(
         1 for row in farm["tiles"] for tile in row

@@ -70,6 +70,19 @@ _NEUTRAL_QUADRANT_UTIL = {"NW": 0.0, "NE": 0.0, "SW": 0.0, "SE": 0.0}  # no quad
                                                                         # don't exercise it
 
 
+def _farm_with_one_fertilizable_tile():
+    """A 3x3 board, all LOCKED except the unit's own shed-adjacent tile
+    (0, 0) and one fertilizable WHEAT tile at (2, 2) -- shared setup for
+    the fertilizer-delivery-vs-liquidation tests below."""
+    board = [["LOCKED" for _ in range(3)] for _ in range(3)]
+    board[0][0] = None
+    board[2][2] = _tile(crop="WHEAT", planted_day=0, watered_today=True)
+    return {
+        "money": 3000.0, "tiles": board, "farmer": [0, 0], "hands": [],
+        "unlocked_quadrants": ["NW"], "hires_today": 0,
+    }
+
+
 def test_is_harvestable_false_immediately_after_planting():
     """The core bug: WHEAT's first_yield_day is 2, but _new_plant seeds
     yield_units at 1 the instant it's planted (kaggriculture.py) -- so
@@ -146,13 +159,7 @@ def test_decide_unit_keeps_freshly_picked_up_fertilizer_when_still_needed():
     every fertilizer pickup livelocks PICKUP/DROP forever -- a 10-seed pool
     comparison with that version collapsed mean money from ~$36-38k to
     ~$2,290 against `random` alone."""
-    board = [["LOCKED" for _ in range(3)] for _ in range(3)]
-    board[0][0] = None  # the unit's own (shed-adjacent) tile
-    board[2][2] = _tile(crop="WHEAT", planted_day=0, watered_today=True)  # fertilizable
-    farm = {
-        "money": 3000.0, "tiles": board, "farmer": [0, 0], "hands": [],
-        "unlocked_quadrants": ["NW"], "hires_today": 0,
-    }
+    farm = _farm_with_one_fertilizable_tile()
     planner = main._CropPlanner({"seeds": {}}, farm, days_remaining=20)
     animal_planner = main._AnimalPlanner(farm, {}, {})
     action = main._decide_unit(
@@ -162,6 +169,25 @@ def test_decide_unit_keeps_freshly_picked_up_fertilizer_when_still_needed():
         quadrant_util=_NEUTRAL_QUADRANT_UTIL,
     )
     assert action == ["EAST"]  # walks toward the fertilizable tile at (2, 2), doesn't DROP
+
+
+def test_decide_unit_sells_fertilizer_during_liquidation_even_if_still_wanted():
+    """See the module docstring's Endgame liquidation (fertilizer) note: a
+    replay showed real, ongoing dollar value sitting in unit inventories
+    that never made it back to the shed before the season ended. Once
+    liquidating, a further fertilizer-delivery trip isn't worth the travel
+    time even if some crop is nominally still fertilizable -- carry it to
+    the shed and sell it instead of holding out for a delivery."""
+    farm = _farm_with_one_fertilizable_tile()
+    planner = main._CropPlanner({"seeds": {}}, farm, days_remaining=1)
+    animal_planner = main._AnimalPlanner(farm, {}, {})
+    action = main._decide_unit(
+        pos=[0, 0], inv={"FERTILIZER": 1}, farm=farm, private={"shed": {}}, day=0, board_size=3,
+        claimed=set(), planner=planner, animal_planner=animal_planner, shed_tiles={(0, 0)},
+        want_fertilizer=True, liquidating=True, animal_zone=set(),
+        quadrant_util=_NEUTRAL_QUADRANT_UTIL,
+    )
+    assert action == ["DROP"]
 
 
 def test_step_toward_moves_one_axis_at_a_time():
@@ -252,6 +278,25 @@ def test_crop_planner_avoids_depressed_price_crop():
     assert planner.choose() in ("WHEAT", "CARROT")
 
 
+def test_crop_planner_price_attractiveness_can_override_target_share_gap():
+    """See the module docstring's Price-attractiveness-aware planting note:
+    a real replay showed STRAWBERRY at 2x+ its base price still losing to
+    MELON at roughly par, because _price_ok is a binary pass/fail -- once
+    both crops clear it, only the target-mix-share gap decided, and
+    MELON's dominant 45% share almost always has the bigger raw gap.
+    STRAWBERRY (5% share) at a genuinely great price should be able to
+    outrank MELON (45% share) merely at par."""
+    farm = _farm({})
+    private = {"seeds": {"MELON": 5, "STRAWBERRY": 5}}
+    prices = {"MELON": 250, "STRAWBERRY": 240}  # melon at 1.0x its base (250),
+                                                  # strawberry at 2.0x its base (120)
+    planner = main._CropPlanner(private, farm, days_remaining=20, prices=prices)
+    planner.counts["MELON"] = 40
+    planner.counts["STRAWBERRY"] = 3
+    planner.total = 100
+    assert planner.choose() == "STRAWBERRY"
+
+
 def test_crop_planner_falls_back_when_every_price_is_depressed():
     """Land should never sit idle just because the whole market dipped at
     once -- fall back to plain share-balancing (MELON, same as the
@@ -286,7 +331,7 @@ def test_find_target_prefers_the_less_planted_quadrant_on_a_distance_tie():
     tiles = [[None for _ in range(board_size)] for _ in range(board_size)]
     for (x, y) in [(0, 0), (1, 0), (0, 1)]:
         tiles[y][x] = _tile(watered_today=True)  # tended, so not a competing water candidate
-    farm = {"tiles": tiles}
+    farm = {"tiles": tiles, "hands": []}
     private = {"seeds": {"WHEAT": 5}}
     planner = main._CropPlanner(private, farm, days_remaining=20)
     animal_planner = main._AnimalPlanner(farm, {}, {})
@@ -298,6 +343,22 @@ def test_find_target_prefers_the_less_planted_quadrant_on_a_distance_tie():
         animal_zone=set(), quadrant_util=quadrant_util,
     )
     assert (target[0], target[1]) == (2, 0)  # NE's empty tile, not NW's (1, 1) despite equal raw distance
+
+
+def test_animal_target_caps_at_crew_capacity_not_just_land_share():
+    """See the module docstring's Animal capacity vs crop capacity note: a
+    real replay showed the land-share target alone reaching 14 animal
+    structures with only 7 units (farmer + 6 hands) total to also tend
+    crops -- crop upkeep collapsed for the second half of the season.
+    _animal_target must cap at whatever the crew can support, not just how
+    much land is owned."""
+    big_land_tiny_crew = {"tiles": [[None] * 10 for _ in range(10)], "hands": []}
+    # land_target = round(100 * 0.18) = 18; capacity_target = round(1 * 1.0) = 1
+    assert main._animal_target(big_land_tiny_crew) == 1
+
+    small_land_big_crew = {"tiles": [[None] * 3 for _ in range(3)], "hands": [[0, 0]] * 6}
+    # land_target = round(9 * 0.18) = 2; capacity_target = round(7 * 1.0) = 7 -- land wins
+    assert main._animal_target(small_land_big_crew) == 2
 
 
 def test_animal_zone_prefers_tiles_closest_to_shed():
