@@ -726,11 +726,39 @@ layered on top and recovered most of the money (though not the win rate)
 misleadingly noisy in either direction, per the eval-noise note above;
 the same-process 30-seed number is the one to trust. Reverted
 `_build_feed_orders`/`_build_seed_orders`/`_build_fertilizer_orders` back
-to their one-order-per-unit form. The slot-starvation problem itself is
-still real and unaddressed -- worth another look with a smaller-footprint
-idea (e.g. consolidating only the lowest-priority category, or capping
-per-category order count instead of requesting the full amount) and, per
-the pattern above, a same-process A/B before trusting any fix here.
+to their one-order-per-unit form.
+
+**Second attempt at the same bug, also reverted**: instead of consolidating
+into one big order, capped `_build_feed_orders`'s per-unit loop at
+`FEED_ORDERS_PER_TURN_CAP = 3` orders/turn -- same one-unit-per-order
+shape as before (so it couldn't be the earlier fix's slot-pairing-with-
+the-opponent mechanism), just fewer of them, still topping the reserve up
+over a few turns since `needed` is recomputed fresh each turn from
+current shed stock. Confirmed this genuinely fixes the *symptom*: a real
+replay that used to crash to 0/5 seed types in stock by day 15 and stay
+there for the rest of the game (0 `BUY_SEED` orders sampled from day 13
+to day 29) instead kept 2-3 of every seed type in stock the whole game,
+`_build_feed_orders` itself capped at exactly 3 orders as designed.
+**Measured worse anyway**: same-process 30-seed A/B (git HEAD = the
+Planting-priority-under-the-gate fix alone, no feed-cap) against
+`reference/main_fertilizer_selling_submitted_20260817.py` -- win rate
+30/30 -> 29/30 (near noise-level, one flipped close game) but mean money
+$61.7k -> $52.9k, a real ~14% drop; against x492, mean money also down
+slightly ($27.8k -> $27.1k), still 0/30 either way. Reverted. **Three
+independent measurements now (full consolidation, this per-turn cap, and
+the earlier reverted sell-side WHEAT reserve) all show the same signature
+against this one specific opponent** -- and that opponent is itself a
+frozen snapshot of an earlier main.py (see `scripts/pool_winrate.py`'s
+DEFAULT_POOL), i.e. a near-mirror match. Leading hypothesis, still
+unconfirmed: something about *this* matchup specifically -- both sides
+running near-identical WHEAT buy/feed/sell logic -- makes any change to
+how aggressively we compete for WHEAT market slots costly in a way that
+doesn't show up against structurally different opponents (x492, the pool
+bots). Worth checking directly before a fourth attempt: does the same fix
+measure differently against a *non-mirror* strong opponent (a real
+downloaded ladder replay's tape, `scripts/extract_replay_tape.py`,
+instead of another main.py snapshot)? The underlying starvation is still
+real and still unaddressed either way.
 
 **Planting priority under the gate**: the same seed-42 replay that caught
 the slot-starvation bug above also showed *why* freeing market slots
