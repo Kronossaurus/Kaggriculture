@@ -234,23 +234,25 @@ def test_build_land_orders_buys_once_utilization_gate_is_met():
     assert orders == [["BUY_LAND"]]
 
 
-def test_build_land_orders_blocked_at_max_useful_quadrants():
-    """A replay caught this: the hire formula (2*quadrants, capped at
-    MAX_HANDS=6) already maxes out at 3 quadrants, so the 4th never
-    unlocks another hand -- buying it just spreads the same crew across
-    more land. The same 6 hands planted no more tiles in absolute terms
-    with 4 quadrants than with 3, just diluted thinner. Don't buy it even
-    at full utilization and plenty of cash. (Task-driven hiring -- sizing
-    the crew off actual pending work instead of this flat quadrant formula
-    -- was tried and reverted, see the module docstring's Task-driven
-    hiring note: it consistently underperformed this simpler cap in every
-    variant measured.)"""
+def test_build_land_orders_buys_the_4th_quadrant_now_that_it_raises_capacity():
+    """A replay originally caught the opposite of this: under the old
+    MAX_HANDS=6, the hire formula (2*quadrants) maxed out at 3 quadrants,
+    so the 4th never unlocked another hand and buying it just spread the
+    same crew across more land for nothing -- see _land_worth_buying's own
+    docstring. `_hands_target`'s current formula (see the module
+    docstring's Real hiring pace note) was deliberately picked to keep
+    raising hire capacity all the way through 4 quadrants, so the 4th
+    *does* raise capacity again and should get bought at full utilization
+    with plenty of cash. (Task-driven hiring -- sizing the crew off actual
+    pending work instead of this flat quadrant formula -- was tried and
+    reverted regardless of this cap, see the module docstring's Task-
+    driven hiring note.)"""
     tiles = {(x, y): _tile() for x in range(3) for y in range(3)}  # 9 of 9 planted (100%)
     farm = _farm(tiles)
     farm["unlocked_quadrants"] = ["NW", "NE", "SW"]
     farm["money"] = 50000.0
     orders = main._build_land_orders(farm, days_remaining=20)
-    assert orders == []
+    assert orders == [["BUY_LAND"]]
 
 
 def test_crop_planner_balances_toward_target_share():
@@ -317,6 +319,31 @@ def test_crop_planner_excludes_crops_that_cannot_mature_in_time():
     planner = main._CropPlanner(private, farm, days_remaining=5)
     assert "MELON" not in planner.plantable_crops
     assert planner.choose() in ("WHEAT", "CARROT")
+
+
+def test_find_target_prioritizes_a_tile_about_to_become_a_weed():
+    """See the module docstring's Neglected-tile urgency note: a tile with
+    consecutive_unwatered >= 1 is one missed watering from turning into a
+    WEED (kaggriculture.py) -- it must win over a routine, merely-closer
+    watering chore, or distant land quietly loses crops to neglect no
+    matter what spatial-balancing exists elsewhere."""
+    board_size = 5
+    tiles = [[None for _ in range(board_size)] for _ in range(board_size)]
+    routine = _tile(watered_today=False)
+    routine["consecutive_unwatered"] = 0  # watered fine yesterday, a full day of slack left
+    at_risk = _tile(watered_today=False)  # _tile()'s own default: consecutive_unwatered=1
+    tiles[0][1] = routine  # close: (1, 0), dist=1 from (0, 0)
+    tiles[4][4] = at_risk  # far: (4, 4), dist=8 from (0, 0)
+    farm = {"tiles": tiles, "hands": []}
+    animal_planner = main._AnimalPlanner(farm, {}, {})
+    target = main._find_target(
+        pos=[0, 0], farm=farm, day=0, board_size=board_size, claimed=set(), inv={},
+        planner=main._CropPlanner({"seeds": {}}, farm, days_remaining=20),
+        animal_planner=animal_planner, shed_tiles=set(),
+        want_fertilizer=False, shed_wheat_available=False, liquidating=False,
+        animal_zone=set(), quadrant_util=_NEUTRAL_QUADRANT_UTIL,
+    )
+    assert (target[0], target[1]) == (4, 4)  # the at-risk tile wins despite being much farther
 
 
 def test_find_target_prefers_the_less_planted_quadrant_on_a_distance_tie():

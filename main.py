@@ -517,6 +517,79 @@ fertilizable (see `_find_target`'s `carrying_produce`/`_decide_unit`'s
 `carried_produce`). WHEAT's feed reserve is deliberately left untouched --
 missing a feed this late still loses the whole animal outright, a bigger
 loss than the travel time saved.
+
+**Neglected-tile urgency**: the "canto distante perdendo cultura" gap
+(the pre-existing tile-clustering note above, and the specific NW/NE
+neglect the animal-capacity fix addressed) has one root cause left after
+both of those: `_find_target`'s water candidates all shared one priority
+regardless of how close a tile actually was to becoming a WEED, so a unit
+chasing a marginally-closer *routine* chore near the shed could keep
+winning over walking out to save a tile one missed watering from being
+lost outright, no matter how the spatial-balancing fixes above steered
+planting. Considered and rejected first: a dedicated unit for distant
+tiles, the user's own first suggestion -- this project already measured
+that exact shape of fix for animals (2 of 6 hands walled off, Animal
+husbandry attempt 2) and it was a severe net negative (-60 to -66%
+money): fixed allocation wastes capacity whenever its designated zone
+doesn't have enough work to fill every turn. Went with priority instead:
+a tile with `consecutive_unwatered >= 1` (kaggriculture.py -- missing
+water two days running turns a PLANT into a WEED, and even a fresh
+planting starts pre-loaded at 1, "the planting day counts as unwatered")
+now scores 0.5 instead of the routine `water_priority`, just below
+harvest's own 0 (already-earned money is never worth delaying for a tile
+that would only avoid a *future* loss) but above every other routine
+chore. Measured across three passes, honestly mixed rather than a clean
+win: the fix alone (10-seed pool) dipped mean money modestly against most
+of the non-adversarial pool (e.g. `random` $56.1k -> $52.9k) and the
+head-to-head against yesterday's frozen submission snapshot from 8/10 to
+7/10 seeds -- plausibly because a 7-unit crew managing 75+ tiles hits
+`consecutive_unwatered >= 1` often enough that it's closer to routine load
+than a rare emergency, so reprioritizing what an already-saturated crew
+does doesn't clearly help on its own. Paired with raising `MAX_HANDS` 6 ->
+8 (a modest re-try, not the 12 already measured worse pre-animal-cap/
+fertilizer-selling -- see `_land_worth_buying`'s own docstring) recovered
+most of the gap: back to 8/10 seeds against the frozen snapshot, and
+`random`/`main_land_gate_60pct.py` both ticked back up. Kept on balance --
+still not a clean statistical win in this specific pool, but it fixes a
+real, replay-diagnosed correctness gap (crops actually dying to neglect)
+that a few thousand dollars of pool noise shouldn't override, and
+`MAX_HANDS=8` conveniently exactly matches 2 * the 4-quadrant land cap,
+so it stops being a binding constraint at all rather than an arbitrary
+bump. Most matchups in this pool never actually reach a fully-utilized
+4th quadrant within 30 days, so this pairing is under-exercised by the
+current pool roster -- a stronger test would need an opponent that
+reliably pushes the game there.
+
+**Real hiring pace, superseding the MAX_HANDS=8 pairing above**: asked to
+analyze hand counts in the same downloaded top-ladder replays (3 games,
+same #1 player), not just money/production. The flat `2 * quadrants`
+formula wasn't just under capped, it was the wrong *shape* -- real hiring
+isn't proportional to land at all: 5 hands on day 0 with only the
+starting NW quadrant, 12 by day 9 with just 2 quadrants, settling at
+10-12 for the rest of every season regardless of reaching all 4
+quadrants. `_hands_target` now uses `HANDS_BASE + HANDS_PER_QUADRANT *
+quadrants` (5/8/11/12 at 1-4 quadrants) instead of `2 * quadrants`
+(2/4/6/8 under the old MAX_HANDS=6, capped at 6/8 either way) -- close to
+the observed curve at 1 and 4 quadrants, still short at 2-3 but a large
+step up from before, and deliberately kept strictly increasing through
+all 4 quadrants so `_land_worth_buying` never blocks the last one. This
+looks like exactly the kind of change a previous pass already measured as
+worse (`MAX_HANDS` raised to 12 "with hires scaled to match" -- see the
+Land utilization gate note above): more hands dumping more simultaneous
+harvests crashed crop prices faster than the extra fib-scaling hire cost
+paid back. Retried anyway because two things changed since that measurement:
+the animal-capacity cap now caps how much of the crew's harvest volume is
+animal product, and fertilizer selling opened a revenue channel that
+doesn't compete in the same crop markets at all. The retry decisively
+confirms the economy really did change: 10-seed pool comparison, mean
+money up 16-41% across every non-adversarial pool opponent on top of
+every earlier gain this session (e.g. `random` $54.5k -> $72.1k, `starter`
+$52.3k -> $73.5k), and the head-to-head against yesterday's frozen
+submission snapshot improved to 9/10 seeds won (from 8/10). The Neglected-
+tile urgency fix and this hiring-pace change were kept together, not
+re-isolated -- both are independently well-motivated by the same replay
+evidence, and untangling their individual contributions wasn't worth
+another measurement pass given how clearly positive the combination is.
 """
 
 from __future__ import annotations
@@ -594,7 +667,15 @@ FEED_MAX_PRICE_FRAC = 5.0  # a near-nonbinding backstop, not a real cap: missing
                             # inflated wheat price -- see the module docstring's Animal
                             # husbandry (attempt 2) note for why a tighter cap is a trap
 
-MAX_HANDS = 6
+HANDS_BASE = 2  # hands hired even at the starting NW quadrant alone
+HANDS_PER_QUADRANT = 3
+MAX_HANDS = 12  # was 6, briefly 8; see the module docstring's Real-hiring-pace note --
+                # a real top-ladder replay showed 5 hands on day 0 with 1 quadrant and
+                # 10-12 sustained for the rest of the season, nothing like the old
+                # `2 * quadrants` formula's pace. HANDS_BASE/HANDS_PER_QUADRANT/
+                # MAX_HANDS were picked so _hands_target(quadrants) tracks that curve
+                # (5/8/11/12 at 1-4 quadrants) while staying strictly increasing
+                # through all 4 quadrants, so _land_worth_buying never blocks the 4th
 SAFETY_RESERVE = 300  # cash kept in reserve before optional buys/land/fertilizer
 MAX_MARKET_ORDERS = 10  # data/README.md default; not exposed in `obs`
 
@@ -951,6 +1032,17 @@ def _find_target(
     crop that won't finish growing in time is wasted effort, while getting
     already-harvested produce into the shed guarantees it can still be sold.
 
+    A tile with `consecutive_unwatered >= 1` (kaggriculture.py: missing
+    water two days running turns a PLANT into a WEED, and a fresh planting
+    already starts pre-loaded at 1 -- "the planting day counts as
+    unwatered") is one miss away from being lost outright, so its water
+    candidate jumps to harvest's own priority (0) instead of the routine
+    `water_priority` -- see the module docstring's Neglected-tile urgency
+    note. This is what actually stops distant land from quietly losing
+    crops to neglect, not geography: a unit chasing marginally-closer
+    routine chores near the shed will still lose to a genuinely at-risk
+    tile regardless of how far away it is.
+
     Every candidate carries a precomputed `sort_dist` (its 4th field) rather
     than the sort key recomputing raw distance uniformly: a fresh PLANT
     candidate gets its raw distance inflated by how utilized its quadrant
@@ -975,7 +1067,11 @@ def _find_target(
                 if _is_harvestable(tile, day):
                     candidates.append((x, y, 0, dist))  # harvest
                 elif not tile["watered_today"]:
-                    candidates.append((x, y, water_priority, dist))
+                    at_risk = not liquidating and tile.get("consecutive_unwatered", 0) >= 1
+                    # 0.5: below harvest (0, already-earned money, never worth delaying for
+                    # a tile that would merely avoid a future loss) but above every routine
+                    # chore, including normal watering
+                    candidates.append((x, y, 0.5 if at_risk else water_priority, dist))  # water
                 elif inv.get("FERTILIZER", 0) > 0 and _is_fertilizable(tile, day):
                     candidates.append((x, y, 3, dist))  # deliver fertilizer
             elif _is_weed(tile):
@@ -1154,17 +1250,21 @@ def _build_sell_orders(shed, prices, days_remaining):
 
 
 def _hands_target(quadrants):
-    return min(MAX_HANDS, 2 * quadrants)
+    return min(MAX_HANDS, HANDS_BASE + HANDS_PER_QUADRANT * quadrants)
 
 
 def _land_worth_buying(quadrants_now):
     """The next quadrant only pays for itself if it actually raises hire
-    capacity -- see the module docstring's Land utilization gate note. The
-    hire formula (2*quadrants, capped at MAX_HANDS) hits its ceiling at
-    quadrants_now == MAX_HANDS // 2 (3, at the default MAX_HANDS=6); a
-    replay showed the same MAX_HANDS=6 hands spread across a 4th quadrant's
-    extra land planting no more tiles in absolute terms than 3 quadrants'
-    worth -- just diluted thinner, plus the quadrant's own price wasted."""
+    capacity -- see the module docstring's Land utilization gate note.
+    Originally caught with the old `2 * quadrants` hire formula (capped at
+    MAX_HANDS=6): the ceiling fell at exactly 3 quadrants, and a replay
+    showed the same 6 hands spread across a 4th quadrant's extra land
+    planting no more tiles in absolute terms than 3 quadrants' worth, just
+    diluted thinner. `_hands_target`'s current formula (see the module
+    docstring's Real hiring pace note) was deliberately picked to stay
+    strictly increasing all the way through 4 quadrants, so this stops
+    blocking anything in practice under it -- the mechanism stays in place
+    regardless, for whatever the hire formula ends up being."""
     return _hands_target(quadrants_now + 1) > _hands_target(quadrants_now)
 
 
