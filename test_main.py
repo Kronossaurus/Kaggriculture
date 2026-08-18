@@ -125,7 +125,7 @@ def test_decide_unit_digs_a_weed_instead_of_stalling():
     action = main._decide_unit(
         pos=[0, 0], inv={}, farm=farm, private={"shed": {}}, day=0, board_size=3, claimed=claimed,
         planner=planner, animal_planner=animal_planner, shed_tiles=set(), want_fertilizer=False, liquidating=False,
-        animal_zone=set(), quadrant_util=_NEUTRAL_QUADRANT_UTIL,
+        animal_zone=set(), quadrant_util=_NEUTRAL_QUADRANT_UTIL, plant_priority=main.PLANT_PRIORITY,
     )
     assert action == ["DIG"]
 
@@ -146,7 +146,7 @@ def test_decide_unit_drops_surplus_fertilizer_at_the_shed():
         pos=[0, 0], inv={"FERTILIZER": 3}, farm=farm, private={"shed": {}}, day=0, board_size=3,
         claimed=claimed, planner=planner, animal_planner=animal_planner, shed_tiles={(0, 0)},
         want_fertilizer=False, liquidating=False, animal_zone=set(),
-        quadrant_util=_NEUTRAL_QUADRANT_UTIL,
+        quadrant_util=_NEUTRAL_QUADRANT_UTIL, plant_priority=main.PLANT_PRIORITY,
     )
     assert action == ["DROP"]
 
@@ -166,7 +166,7 @@ def test_decide_unit_keeps_freshly_picked_up_fertilizer_when_still_needed():
         pos=[0, 0], inv={"FERTILIZER": 1}, farm=farm, private={"shed": {}}, day=0, board_size=3,
         claimed=set(), planner=planner, animal_planner=animal_planner, shed_tiles={(0, 0)},
         want_fertilizer=True, liquidating=False, animal_zone=set(),
-        quadrant_util=_NEUTRAL_QUADRANT_UTIL,
+        quadrant_util=_NEUTRAL_QUADRANT_UTIL, plant_priority=main.PLANT_PRIORITY,
     )
     assert action == ["EAST"]  # walks toward the fertilizable tile at (2, 2), doesn't DROP
 
@@ -185,7 +185,7 @@ def test_decide_unit_sells_fertilizer_during_liquidation_even_if_still_wanted():
         pos=[0, 0], inv={"FERTILIZER": 1}, farm=farm, private={"shed": {}}, day=0, board_size=3,
         claimed=set(), planner=planner, animal_planner=animal_planner, shed_tiles={(0, 0)},
         want_fertilizer=True, liquidating=True, animal_zone=set(),
-        quadrant_util=_NEUTRAL_QUADRANT_UTIL,
+        quadrant_util=_NEUTRAL_QUADRANT_UTIL, plant_priority=main.PLANT_PRIORITY,
     )
     assert action == ["DROP"]
 
@@ -253,6 +253,18 @@ def test_build_land_orders_buys_the_4th_quadrant_now_that_it_raises_capacity():
     farm["money"] = 50000.0
     orders = main._build_land_orders(farm, days_remaining=20)
     assert orders == [["BUY_LAND"]]
+
+
+def _animal_tile(kind="PASTURE"):
+    return {"kind": kind, "animal": "COW" if kind == "PASTURE" else "GOOSE"}
+
+
+def test_build_feed_orders_skipped_when_reserve_already_met():
+    tiles = {(0, 0): _animal_tile()}
+    farm = _farm(tiles)
+    private = {"shed": {"WHEAT": 999}}
+    prices = {"WHEAT": 25}
+    assert main._build_feed_orders(farm, private, prices, money=10000.0) == []
 
 
 def test_crop_planner_balances_toward_target_share():
@@ -341,9 +353,61 @@ def test_find_target_prioritizes_a_tile_about_to_become_a_weed():
         planner=main._CropPlanner({"seeds": {}}, farm, days_remaining=20),
         animal_planner=animal_planner, shed_tiles=set(),
         want_fertilizer=False, shed_wheat_available=False, liquidating=False,
-        animal_zone=set(), quadrant_util=_NEUTRAL_QUADRANT_UTIL,
+        animal_zone=set(), quadrant_util=_NEUTRAL_QUADRANT_UTIL, plant_priority=main.PLANT_PRIORITY,
     )
     assert (target[0], target[1]) == (4, 4)  # the at-risk tile wins despite being much farther
+
+
+def test_find_target_plant_priority_loses_to_weeding_at_baseline():
+    """See the module docstring's Planting priority under the gate note:
+    at PLANT_PRIORITY (4), a routine weed-clear (2) always wins regardless
+    of distance -- priority strictly outranks distance in _find_target's
+    sort key."""
+    board_size = 5
+    tiles = [[None for _ in range(board_size)] for _ in range(board_size)]
+    tiles[0][1] = {"kind": "WEED"}  # close: (1, 0), dist=1
+    farm = {"tiles": tiles, "hands": []}
+    private = {"seeds": {"WHEAT": 5}}
+    planner = main._CropPlanner(private, farm, days_remaining=20)
+    animal_planner = main._AnimalPlanner(farm, {}, {})
+    target = main._find_target(
+        pos=[0, 0], farm=farm, day=0, board_size=board_size, claimed=set(), inv={},
+        planner=planner, animal_planner=animal_planner, shed_tiles=set(),
+        want_fertilizer=False, shed_wheat_available=False, liquidating=False,
+        animal_zone=set(), quadrant_util=_NEUTRAL_QUADRANT_UTIL, plant_priority=main.PLANT_PRIORITY,
+    )
+    assert (target[0], target[1]) == (1, 0)  # weed wins even though (0,0) itself is plantable
+
+
+def test_find_target_plant_priority_beats_weeding_under_the_gate():
+    """Same setup as above, but with PLANT_PRIORITY_UNDER_GATE (1.5, below
+    weeding's 2): planting a nearby empty tile now wins over walking to a
+    farther weed -- this is the fix for land sitting under-utilized despite
+    a full crew, see the module docstring's note."""
+    board_size = 5
+    tiles = [[None for _ in range(board_size)] for _ in range(board_size)]
+    tiles[4][4] = {"kind": "WEED"}  # far: (4, 4), dist=8
+    farm = {"tiles": tiles, "hands": []}
+    private = {"seeds": {"WHEAT": 5}}
+    planner = main._CropPlanner(private, farm, days_remaining=20)
+    animal_planner = main._AnimalPlanner(farm, {}, {})
+    target = main._find_target(
+        pos=[0, 0], farm=farm, day=0, board_size=board_size, claimed=set(), inv={},
+        planner=planner, animal_planner=animal_planner, shed_tiles=set(),
+        want_fertilizer=False, shed_wheat_available=False, liquidating=False,
+        animal_zone=set(), quadrant_util=_NEUTRAL_QUADRANT_UTIL,
+        plant_priority=main.PLANT_PRIORITY_UNDER_GATE,
+    )
+    assert target[2] == main.PLANT_PRIORITY_UNDER_GATE  # a nearby empty tile, not the distant weed
+
+
+def test_land_utilization_selects_boosted_plant_priority_below_the_gate():
+    """Locks agent()'s own selection logic (see the module docstring's
+    Planting priority under the gate note) via the shared _land_utilization
+    helper _build_land_orders also uses."""
+    tiles = {(0, 0): _tile()}  # 1 of 9 owned tiles planted -- well under the 0.50 gate
+    farm = _farm(tiles)
+    assert main._land_utilization(farm) < main.LAND_UTILIZATION_GATE
 
 
 def test_find_target_prefers_the_less_planted_quadrant_on_a_distance_tie():
@@ -367,7 +431,7 @@ def test_find_target_prefers_the_less_planted_quadrant_on_a_distance_tie():
         pos=[1, 0], farm=farm, day=0, board_size=board_size, claimed=set(), inv={},
         planner=planner, animal_planner=animal_planner, shed_tiles=set(),
         want_fertilizer=False, shed_wheat_available=False, liquidating=False,
-        animal_zone=set(), quadrant_util=quadrant_util,
+        animal_zone=set(), quadrant_util=quadrant_util, plant_priority=main.PLANT_PRIORITY,
     )
     assert (target[0], target[1]) == (2, 0)  # NE's empty tile, not NW's (1, 1) despite equal raw distance
 

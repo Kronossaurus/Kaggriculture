@@ -684,6 +684,86 @@ that tight can't clear the price often enough to actually feed animals,
 losing them outright. `FEED_MAX_PRICE_FRAC`'s current 5.0 has plenty of
 headroom above that failure zone, so no change needed there either, but
 it's worth remembering as a hard floor if this constant is ever revisited.
+
+**Market-order-slot starvation, found but the fix measured worse --
+reverted**: a downloaded `main.py` vs `reference/x492_nah_i_d_win.py`
+replay (seed 42) showed planted-crop tiles peaking at 36/75 on day 11,
+then declining *monotonically* to 2/75 by day 29 -- decoupled from money,
+which was simultaneously climbing fast ($7k on day 20 to $24.6k on day
+27). Land sat mostly barren despite ample idle cash. Diagnosed cause:
+`agent()` builds its market list as sell -> land -> hire -> feed -> seed
+-> fertilizer -> animal, then truncates to `maxMarketOrdersPerTurn` (10,
+silently drops the rest -- see data/README.md). `_build_feed_orders` used
+to append one `["BUY_PRODUCT", "WHEAT", 1]` order per unit needed (up to
+`FEED_RESERVE_PER_ANIMAL * live_animals`, 20+ some turns) instead of a
+single order with quantity N -- across the whole 720-turn replay, 46.2%
+of turns had 8-9 duplicate feed orders alone, and only 6.4% of turns had
+*any* `BUY_SEED` order at all. `_build_seed_orders` had the same
+one-order-per-unit pattern (up to 13 orders across 5 crops). Tried
+consolidating both (plus `_build_fertilizer_orders`, for consistency)
+into one order per resource/crop requesting the full needed quantity --
+data/README.md confirms a single N-quantity order is already processed
+"one-unit-at-a-time" internally for price-impact purposes and stops early
+if money runs out mid-order, so this looked like a pure slot-count win
+with no effect on affordability or price impact. **It measured as a real
+regression anyway**: a same-process 30-seed A/B (git HEAD vs. this fix
+alone, the trusted methodology per the eval-noise note above) against
+`reference/main_fertilizer_selling_submitted_20260817.py` (the pool's
+toughest, most competitive matchup) dropped from 27/30 (90%) to 21/30
+(70%) wins despite similar mean money ($49.6k -> $50.6k) -- more losses
+in exactly the close races where marginal efficiency decides the outcome,
+the same signature as the reverted WHEAT-reserve and animal-token-gating
+fixes elsewhere in this file. Mechanism not confirmed, but a plausible
+one: consolidating into fewer, larger orders changes which of the *other*
+player's own same-turn orders each of mine gets paired against in the
+slot-by-slot simultaneous processing (see data/README.md's Market Action
+section), which can shift realized transaction prices in ways a
+per-order affordability check alone doesn't capture. An isolated 20-seed
+subprocess run of this fix alone looked far worse still (4/20 against the
+same opponent) before the Planting priority under the gate fix below was
+layered on top and recovered most of the money (though not the win rate)
+-- a reminder that a single subprocess `pool_winrate.py` run can be
+misleadingly noisy in either direction, per the eval-noise note above;
+the same-process 30-seed number is the one to trust. Reverted
+`_build_feed_orders`/`_build_seed_orders`/`_build_fertilizer_orders` back
+to their one-order-per-unit form. The slot-starvation problem itself is
+still real and unaddressed -- worth another look with a smaller-footprint
+idea (e.g. consolidating only the lowest-priority category, or capping
+per-category order count instead of requesting the full amount) and, per
+the pattern above, a same-process A/B before trusting any fix here.
+
+**Planting priority under the gate**: the same seed-42 replay that caught
+the slot-starvation bug above also showed *why* freeing market slots
+alone didn't fix utilization -- seeds sat available in inventory near
+their `SEED_RESERVE` targets while planted-tile count kept falling, and a
+turn-by-turn dump of every unit's action showed roughly half of all
+farmer/hand turns were pure movement (`NORTH`/`SOUTH`/`EAST`/`WEST`, no
+work done) across days 15-25. The real cause: `_find_target`'s candidate
+sort key is `(priority, distance)` -- priority strictly dominates, so
+distance never matters until every candidate at a better priority is
+either claimed or absent. A fresh PLANT candidate sat at priority 4, the
+*worst* of every candidate type except nothing -- worse than routine
+watering (1), weeding (2), and fertilizer care (3). A single sampled turn
+had 31 higher-priority candidates outstanding (mostly routine watering)
+for only 12 units -- with owned land generating that much routine
+maintenance most turns, PLANT was essentially never reached regardless of
+how many empty tiles sat right next to an idle-looking unit, capping
+utilization at whatever crop count generates just enough maintenance to
+fully occupy the crew (matching the ~48-56% achievable-utilization
+ceiling documented in the Land utilization gate notes above -- this is
+likely *why* that ceiling exists). Added `PLANT_PRIORITY_UNDER_GATE`
+(1.5): while `_land_utilization(farm)` (the same helper `_build_land_
+orders` gates on) is below `LAND_UTILIZATION_GATE`, a fresh PLANT
+candidate sorts at 1.5 instead of 4 -- still behind harvest (0) and
+at-risk watering (0.5), so a dying crop is never sacrificed for a new
+planting, but now it competes with routine watering and beats weeding and
+fertilizer care instead of always losing to them. Measured in isolation
+(same-process 30-seed A/B, git HEAD vs. this change alone, no order-
+consolidation): a clean win against `reference/main_fertilizer_
+selling_submitted_20260817.py`, 30/30 (100%, up from 28/30) with mean
+money up 24% ($49.6k -> $61.7k), and a small, likely-noise-level cost
+against x492 (mean money down 5.7%, still 0/30 either way -- x492 is
+unwinnable at this agent's current strength regardless). Kept.
 """
 
 from __future__ import annotations
@@ -707,6 +787,15 @@ PRICE_ATTRACTIVENESS_WEIGHT = 0.1  # how much a crop's current price (as a ratio
                                     # base) pulls _CropPlanner.choose() toward it, on top
                                     # of the target-mix-share gap -- see the module
                                     # docstring's Price-attractiveness-aware planting note
+
+PLANT_PRIORITY = 4  # _find_target's base priority for planting an empty tile -- see
+                     # the module docstring's Planting priority under the gate note
+PLANT_PRIORITY_UNDER_GATE = 1.5  # used instead of PLANT_PRIORITY while owned land is
+                                  # under LAND_UTILIZATION_GATE -- still below harvest (0)
+                                  # and at-risk water (0.5) so a dying crop is never
+                                  # sacrificed for a new planting, but now competes with
+                                  # routine water (1) and beats weeding (2) and fertilizer
+                                  # care (3), instead of always losing to them
 
 SEED_RESERVE = {"MELON": 3, "WHEAT": 3, "CARROT": 3, "TOMATO": 2, "STRAWBERRY": 2}
 FERTILIZER_RESERVE = 2
@@ -1128,6 +1217,7 @@ class _AnimalPlanner:
 def _find_target(
     pos, farm, day, board_size, claimed, inv, planner, animal_planner, shed_tiles,
     want_fertilizer, shed_wheat_available, liquidating, animal_zone, quadrant_util,
+    plant_priority,
 ):
     """Scan the whole farm for the nearest (or, for a fresh planting,
     nearest-adjusted-for-quadrant-balance -- see below) unclaimed tile worth
@@ -1151,6 +1241,16 @@ def _find_target(
     crops to neglect, not geography: a unit chasing marginally-closer
     routine chores near the shed will still lose to a genuinely at-risk
     tile regardless of how far away it is.
+
+    `plant_priority` (PLANT_PRIORITY or PLANT_PRIORITY_UNDER_GATE, chosen
+    once per turn in `agent()`) is the priority a fresh PLANT candidate
+    sorts at -- see the module docstring's Planting priority under the
+    gate note: priority strictly outranks distance in this function's sort
+    key, so at its baseline (4, below every maintenance chore except
+    routine water) a single turn with more outstanding water/harvest/weed/
+    animal-care work than there are units leaves *zero* units ever reaching
+    a PLANT candidate, no matter how many empty tiles sit right next to
+    them.
 
     Every candidate carries a precomputed `sort_dist` (its 4th field) rather
     than the sort key recomputing raw distance uniformly: a fresh PLANT
@@ -1205,7 +1305,9 @@ def _find_target(
                     candidates.append((x, y, 4, dist))  # reserved for an animal structure
                 elif planner.has_plantable():
                     q = _quadrant_of(x, y, board_size)
-                    candidates.append((x, y, 4, dist + quadrant_util[q] * spread_penalty))  # plant
+                    candidates.append(
+                        (x, y, plant_priority, dist + quadrant_util[q] * spread_penalty)
+                    )  # plant
                 elif animal_planner.wants_structure():
                     candidates.append((x, y, 4, dist))  # build a structure (overflow beyond the zone)
 
@@ -1234,7 +1336,7 @@ def _build_action(kind):
 
 def _decide_unit(
     pos, inv, farm, private, day, board_size, claimed, planner, animal_planner, shed_tiles,
-    want_fertilizer, liquidating, animal_zone, quadrant_util,
+    want_fertilizer, liquidating, animal_zone, quadrant_util, plant_priority,
 ):
     fx, fy = pos
     tile = farm["tiles"][fy][fx]
@@ -1322,6 +1424,7 @@ def _decide_unit(
     target = _find_target(
         pos, farm, day, board_size, claimed, inv, planner, animal_planner, shed_tiles,
         want_fertilizer, shed_wheat_available, liquidating, animal_zone, quadrant_util,
+        plant_priority,
     )
     if target:
         claimed.add((target[0], target[1]))
@@ -1379,6 +1482,21 @@ def _land_worth_buying(quadrants_now):
     return _hands_target(quadrants_now + 1) > _hands_target(quadrants_now)
 
 
+def _land_utilization(farm):
+    """Fraction of currently-owned (non-LOCKED) tiles that are planted or
+    hold an animal structure. Shared by `_build_land_orders` (the land-buy
+    gate) and `agent()`'s planting-priority boost -- see the module
+    docstring's Planting priority under the gate note."""
+    unlocked = [tile for row in farm["tiles"] for tile in row if tile != "LOCKED"]
+    if not unlocked:
+        return 0.0
+    used = sum(
+        1 for tile in unlocked
+        if _is_plant(tile) or (isinstance(tile, dict) and tile.get("kind") in ("PASTURE", "COOP"))
+    )
+    return used / len(unlocked)
+
+
 def _build_land_orders(farm, days_remaining):
     if days_remaining < LAND_CUTOFF_DAYS:
         return []  # a fresh quadrant can't earn back its cost this close to the end
@@ -1386,12 +1504,7 @@ def _build_land_orders(farm, days_remaining):
     n_extra = quadrants_now - 1  # NW is always owned
     if n_extra >= len(LAND_ORDER) or not _land_worth_buying(quadrants_now):
         return []
-    unlocked = [tile for row in farm["tiles"] for tile in row if tile != "LOCKED"]
-    used = sum(
-        1 for tile in unlocked
-        if _is_plant(tile) or (isinstance(tile, dict) and tile.get("kind") in ("PASTURE", "COOP"))
-    )
-    if unlocked and used / len(unlocked) < LAND_UTILIZATION_GATE:
+    if _land_utilization(farm) < LAND_UTILIZATION_GATE:
         return []  # can't staff what we already own -- more land would just sit idle
     if farm["money"] - SAFETY_RESERVE >= LAND_PRICES[n_extra]:
         return [["BUY_LAND"]]
@@ -1551,6 +1664,9 @@ def agent(obs, config=None):
     animal_planner = _AnimalPlanner(farm, shed, market_prices)
     animal_zone = _animal_zone(farm, board_size, animal_planner.remaining_structures())
     quadrant_util = _quadrant_utilization(farm, board_size)
+    plant_priority = (
+        PLANT_PRIORITY_UNDER_GATE if _land_utilization(farm) < LAND_UTILIZATION_GATE else PLANT_PRIORITY
+    )
 
     claimed = set()
     units = [farm["farmer"]] + list(farm["hands"])
@@ -1570,6 +1686,7 @@ def agent(obs, config=None):
             liquidating,
             animal_zone,
             quadrant_util,
+            plant_priority,
         )
         for i, pos in enumerate(units)
     ]
