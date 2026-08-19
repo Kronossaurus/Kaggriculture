@@ -861,6 +861,41 @@ slot-starvation (the smaller-footprint idea floated above, or something
 new) should be tested against `reference/tape_kiro.py` in addition to the
 mirror-match pool opponent, to see whether the regression pattern from
 the first three attempts is really mirror-match-specific as hypothesized.
+
+**Animal land share raised, tried and reverted**: 22 downloaded real
+ladder replays (this session's investigation with `scripts/
+analyze_replay.py`) found a strong correlation -- opponents ending the
+game with >=20% of
+their land in animals beat this agent 75% of the time, vs. a 36% loss
+rate under 20%. Investigating one extreme case (team "kiro", `reference/
+tape_kiro.py`, 92% animal land share off a single quadrant) suggested why:
+animals don't suffer the crop-collapse problem documented throughout this
+file (no seed-buying, no watering, no market-slot competition for seeds --
+just feed/collect/care), so shifting more weight there looked like a way
+to sidestep a problem that's resisted several direct fixes. Raised
+`ANIMAL_LAND_SHARE` 0.18 -> 0.25 and `ANIMAL_MAX_PER_UNIT` 1.0 -> 1.5
+together (`_animal_target` takes the smaller of the two, so raising
+either alone while the other stays at its old value is a no-op once the
+unraised one is what's actually binding -- confirmed true at 0.18/1.0
+starting around 3 quadrants). **Measured worse**: same-process 30-seed
+A/B (git HEAD vs. this change alone) against `reference/main_fertilizer_
+selling_submitted_20260817.py` dropped win rate 30/30 (100%) -> 28/30
+(93%) with mean money down ~7% ($61.7k -> $57.1k); against x492, mean
+money down ~15% ($27.8k -> $23.6k), still 0/30 either way. A single-seed
+check against the newly-fixed `reference/tape_kiro.py` (the actual replay
+that motivated this) went the other way -- both sides' money rose, ours
+by slightly more -- but n=1 there (tapes are only valid at their recorded
+seed) isn't enough to outweigh a properly-powered 30-seed result showing
+the opposite; see the eval-noise note above for why a single seed's
+result gets distrusted by default in this project. Reverted back to
+0.18/1.0. The correlation in the real replay data is still real and
+still unexplained -- it just isn't as simple as "we should run more
+animals ourselves." Leading open question: maybe it's not animal *count*
+that matters but something about how those specific real opponents
+converted a large flock into money more efficiently than this agent's own
+feed/sell logic does (worth checking FEED/SELL timing and price
+discipline in a real animal-heavy opponent's replay before touching this
+constant again).
 """
 
 from __future__ import annotations
@@ -938,7 +973,9 @@ ANIMAL_TARGET_SHARE = {"COW": 0.60, "SHEEP": 0.40, "GOOSE": 0.0}  # GOOSE has th
 ANIMAL_LAND_SHARE = 0.18  # target fraction of owned tiles reserved for animal
                           # structures -- see the module docstring's Animal husbandry
                           # (attempt 3) note; top-ladder replays hold this steady
-                          # around 15-24% throughout the season
+                          # around 15-24% throughout the season. Tried raising to 0.25
+                          # (see the Animal land share raised, tried and reverted note)
+                          # and it measured worse -- back to 0.18.
 ANIMAL_MAX_PER_UNIT = 1.0  # hard cap on live animals, per farmer/hand currently hired --
                             # see the module docstring's Animal capacity vs crop capacity
                             # note. ANIMAL_LAND_SHARE alone grows with quadrants bought
