@@ -26,7 +26,13 @@ that point, which the engine silently no-ops (data/README.md: invalid
 actions are no-ops, never errors). Early-game structure (hiring pace, land
 timing, opening crop mix) stays representative; late-game precision
 degrades the longer the game runs. Useful as a stress opponent for
-opening-game behavior, not a perfect clone of the original player.
+opening-game behavior, not a perfect clone of the original player. This is
+a *different* problem from the one-turn-late indexing bug fixed 2026-08-18
+(see the `tape` list comprehension below) -- that one made every tape
+wrong by a full turn for the entire game regardless of divergence; this
+caveat is about the tape becoming *increasingly* wrong as a real match
+plays out differently than the recorded one, which no indexing fix can
+solve since the tape genuinely isn't reactive.
 
 Only ever valid at the seed it was recorded with -- pool_winrate.py's
 seeds 1..N sweep doesn't apply; test with run_local.py's --seed instead
@@ -55,7 +61,19 @@ def main() -> None:
     with open(replay_path, encoding="utf-8") as f:
         data = json.load(f)
     steps = data["steps"]
-    tape = [step[player_idx].get("action") or _PASS_ACTION for step in steps]
+    # kaggle_environments logs steps[i]["action"] as the action that PRODUCED observation i
+    # (i.e. the one chosen in response to observing steps[i-1]'s state), not the one chosen in
+    # response to steps[i] itself -- confirmed by instrumenting a live env.run() with a
+    # call-counter agent and comparing against env.toJSON()'s recorded steps. steps[0]'s own
+    # "action" is a placeholder (empty market, PASS) logged before any agent call happens, never
+    # actually chosen by the player. The tape agent below indexes by day*turns_per_day+hour off
+    # its own live obs, which matches steps[i]'s state, so it needs the action that was *chosen*
+    # for that state -- steps[i + 1]'s recorded action, not steps[i]'s. Getting this wrong meant
+    # every previously-extracted tape replayed one turn late for the entire game.
+    tape = [
+        (steps[i + 1][player_idx].get("action") if i + 1 < len(steps) else None) or _PASS_ACTION
+        for i in range(len(steps))
+    ]
 
     info = data.get("info", {})
     team_name = (info.get("TeamNames") or ["?", "?"])[player_idx]
