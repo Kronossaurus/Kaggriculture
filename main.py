@@ -1078,6 +1078,39 @@ throughput is so low here specifically (compare HARVEST-op frequency and
 shed-arrival rate per STRAWBERRY tile against WHEAT/MELON's own, in a
 replay, before touching these constants again) -- not by just re-trying
 a bigger STRAWBERRY share blind.
+
+**Found the throughput mechanism, tried the direct fix, still reverted.**
+Tracked one STRAWBERRY tile's full state across its lifetime in the
+replay above: it harvested correctly all 4 scheduled times (`max_yield`),
+`yield_units` cycling 0->1(or 2)->0 right on schedule -- harvesting
+itself isn't broken. The gap is downstream: `private.inventories` at the
+same timestamps showed 9-10 units of STRAWBERRY sitting in *carried*
+inventory across several units simultaneously, not in the shed. Cause:
+`_find_target`'s `shed_priority` for walking carried produce home was a
+flat 5 -- the *worst* tier, below even routine watering (1) and weeding
+(2). With a dense, continuously-cycling crop like STRAWBERRY generating
+a steady stream of priority-0 harvest candidates, a unit already
+carrying produce never won the race to walk home; it kept getting
+redirected to the next harvest instead, chaining indefinitely. Added
+`SHED_RETURN_PRIORITY = 2` (replacing the hardcoded 5), so a carrying
+unit still yields to anything genuinely urgent (harvest 0, at-risk water
+0.5, routine water 1) but now competes with weeding instead of always
+losing to it. **Measured as a real regression across the full panel**:
+mirror-match pool opponent 30/30 -> 28/30 wins, mean money -13%; x492
+mean money -10%; against `reference/tape_kiro.py`, a clean win flipped
+to a clear loss ($38.5k -> $32.1k while kiro's own money rose 44% to
+$54.8k). Reverted to the flat 5. Plausible mechanism: raising shed-return
+to compete with weeding evidently trades one problem for another --
+weeds now win ties against a returning unit less often, but the same
+unit also now abandons *weeding itself* and boosted-priority planting
+(1.5, see the Planting priority under the gate note) more readily to
+cash out, undoing more value than the recovered carried-produce fixed.
+The underlying diagnosis (produce piling up in carry under a
+continuously-cycling crop) is solid and directly confirmed in a replay
+-- the fix just needs to be more targeted than a blanket priority bump
+(e.g. only escalate shed-return priority once a unit is carrying above
+some threshold quantity, rather than unconditionally) before trying
+again.
 """
 
 from __future__ import annotations
