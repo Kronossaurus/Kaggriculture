@@ -5,1112 +5,252 @@ per turn for whichever player index we've been assigned. Keep this file
 self-contained (or bundle extra modules into a tar.gz with this at the root
 per AGENTS.md) since it's shipped standalone to the competition runner.
 
-Strategy ("farm maxxer"): a scripted multi-unit farm loop built on top
-of `reference/melon_maxxer.py` (Kaggle's own official example agent, see its
-docstring), fixing three of its four documented weaknesses (see the
-Correction note below for the fourth):
+Strategy ("farm maxxer"): a scripted multi-unit farm loop built on top of
+`reference/melon_maxxer.py` (Kaggle's own official example agent), fixing its
+three big gaps -- it never expands land or hires hands (this agent buys land
+and hires every day; hiring is fib(n) dollars for the n-th hire that day, so
+essentially free), it only ever grows MELON (this agent grows a mix, see the
+Crop mix note below), and it never fertilizes (this agent fertilizes every
+one-time crop, whose unfertilized yield cap is strictly below fertilized --
+MELON's cap is reachable by watering alone, so it's skipped there).
 
-  - melon_maxxer never expands land or hires hands -> this agent buys land
-    greedily and hires hands every day (hiring is *extremely* cheap: fib(n)
-    dollars for the n-th hire that day, i.e. $1, $1, $2, $3, $5, ... -- see
-    kaggriculture.py's `_hire_cost`), then drives every hand with the same
-    per-unit task logic as the farmer.
-  - melon_maxxer only ever grows MELON -> this agent grows a mix of MELON
-    (highest value/tile/day by a wide margin, per data/README.md's Object
-    Types table), WHEAT and CARROT (cheap, fast-cycling fillers that keep
-    tiles turning over while melons mature, and diversify what's sellable
-    when one crop's market price is depressed).
-  - melon_maxxer never fertilizes -> this agent fertilizes WHEAT/CARROT
-    (one-time crops whose *unfertilized* yield cap is strictly below their
-    fertilized cap, per data/README.md's Harvest Yields section -- melon's
-    cap is reachable by watering alone, fertilizer there only shortens the
-    growth window, so it's skipped as lower value for the added complexity).
+Below is a condensed log of what's currently in place and why, plus the
+handful of specific ideas that were tried and clearly failed (so they aren't
+blindly retried). The full blow-by-blow for any of this -- exact A/B numbers,
+which replays motivated it, every reverted intermediate attempt -- lives in
+git history and this project's session memory, not here; this docstring only
+tracks design decisions that still affect how the code should be read or
+changed.
 
-**Correction -- the fourth "fix" (throttled selling) was reverted, it was a
-regression**: melon_maxxer dumps its entire shed in one SELL order once a
-threshold is crossed, which can crash the price mid-sale (price moves
-unit-by-unit *within* an order, see data/README.md's Market Mechanics). An
-earlier version of this agent capped how much of each crop it sold per turn
-to avoid that, on paper a strict improvement. Measured instead: a deterministic
-20-seed head-to-head between that version and an ablation that dumps
-everything (`reference/main_dump_sell.py`) was a 19/20-seed *loss* for the
-capped version. Root cause: holding harvested value in the shed waiting for
-the cap to free up slows reinvestment into land/seeds/hands more than the
-occasional price dip from a big dump costs, at this agent's actual
-production scale -- the theoretical concern was real but small relative to
-the throttling's own opportunity cost. `_build_sell_orders` now dumps in
-full again, like melon_maxxer, with the shed-overflow-guard threshold-bypass
-(`SHED_OVERFLOW_GUARD`) kept since that part was never in question.
+**Methodology, load-bearing for everything below.** A single 10-seed
+`pool_winrate.py` run has a real noise floor around +/-2 seeds out of 10 --
+rerunning the identical script with no code change has produced different
+win counts, worse when run concurrently with other heavy background work but
+present even in isolation. Trust a 30-seed run (or a same-process A/B, i.e.
+both variants evaluated in one script/process on the same seeds back-to-back)
+over any single small run, and re-run before trusting a surprising result.
+Money margin against a single opponent is not the same signal as win rate --
+validate both, ideally against a panel that includes genuinely close
+matchups, not just lopsided ones. Several "obviously safe" tweaks in this
+file's history measured as real regressions despite looking correct on
+paper; nothing here is kept on faith.
 
-**Selling strategy, revisited and closed out**: the 19/20-seed result above
-was measured, not explained, at the time. Working out *why* (`market_price`/
-`_refresh_prices` in kaggle_environments' own `kaggriculture.py`, plus a real
-downloaded replay -- see `reference/community_dataset/` and the module
-docstring's earlier replay-tooling notes): price is a deterministic function
-of the market's *current* inventory level alone, and every SELL adds to that
-inventory one unit at a time with no reset in between orders. That makes
-total revenue for selling a fixed total quantity mathematically *path-
-independent* -- one 80-unit MELON order and eighty 1-unit MELON orders
-starting from the same inventory produce the exact same total revenue to
-the dollar (verified numerically: both settle at $18,329 for a solo 80-unit
-dump from I0). Splitting an order can only ever change *when* the cash
-lands, never how much of it there is, absent inventory recovery in between
--- and recovery is too slow to matter at this agent's production scale for
-the resources that matter most (MELON/WOOL have no town shop demand at all,
-only the town center's flat ~1-unit/day trickle, per the Price-aware
-planting note above). This is the mechanistic reason throttled selling lost:
-it paid the exact same total price degradation as dumping, plus a pure,
-avoidable reinvestment delay. A downloaded replay
-(`replays/kaggle_submission/episode-94006627-replay.json`) also confirmed
-the market really is shared and concurrent exactly as `data/README.md`
-describes: turns where both players sold the same resource showed the
-market's inventory change reflecting *both* players' volume (partly offset
-by that turn's town consumption), meaning an opponent selling the same crop
-the same turn does affect the price we receive -- but this is a genuinely
-uncontrollable multiplayer dynamic, not something our own order batching,
-timing, or list position can influence, since we choose our market orders
-without seeing the opponent's for that same turn. Conclusion: there is no
-selling-mechanism fix left to find here -- the only lever that actually
-moves this needle is *how much* gets produced/sold in total over the
-season relative to town absorption capacity, which is exactly what the
-Land utilization gate, Task-driven hiring, and Price-aware planting notes
-elsewhere in this docstring already investigated (and, in every case but
-the land gate, reverted after measuring it made things worse). No code
-change came out of this pass; it exists to stop a future session from
-re-litigating "maybe throttled/staggered selling would help" without first
-re-deriving this.
+**Selling**: `_build_sell_orders` dumps the full shed once a crop's price
+clears its sell threshold, same as melon_maxxer -- an earlier version capped
+how much sold per turn (in case a big dump crashes its own price) and lost
+19/20 seeds head-to-head, because the delayed reinvestment cost more than
+the occasional price dip. FERTILIZER is also sellable and is a real revenue
+source (see the "Selling fertilizer" trail this began from -- some real
+opponents run animal-heavy setups that produce far more fertilizer than they
+can use). `SHED_OVERFLOW_GUARD` bypasses the price threshold before the shed
+overflows and produce gets discarded.
 
-**Selling fertilizer**: closing out the selling investigation above still
-left one concrete question unasked -- *what* top players actually sell, not
-just how. Breaking down `reference/community_dataset/`'s top-ladder replays
-by per-resource revenue (four games, three different top players) found
-FERTILIZER as the single largest or second-largest revenue source in every
-one of them (21-59% of total sell revenue, ahead of WHEAT and comparable to
-or ahead of WOOL), while MELON -- this agent's dominant crop share -- was
-consistently minor for the strongest player (5-9%). This agent never sold
-FERTILIZER at all: it's not in `SELL_PARAMS`, and FERTILIZER collected from
-animal structures via `COLLECT_FERTILIZER` landed in a unit's own inventory
-with only one way out -- `_find_target`'s "deliver fertilizer" candidate,
-which only exists while some crop tile is still eligible
-(`_is_fertilizable`). Once nothing needed it, a unit carrying surplus
-collected FERTILIZER had no candidate left to chase at all (the shed-return
-trigger explicitly excluded FERTILIZER from what counted as "produce") and
-just sat there holding it, forever, for the rest of the game. Fixed by
-letting surplus FERTILIZER count as "carried produce" (sellable once
-`SELL_PARAMS["FERTILIZER"]`'s threshold clears) whenever `not
-want_fertilizer` -- i.e. only when nothing on the whole farm is currently
-fertilizable, never while a delivery is still possible. **The first version
-of this fix dropped the `want_fertilizer` condition entirely** (any carried
-FERTILIZER always counted as produce), reasoning that `_find_target`'s
-higher-priority delivery candidate (3) would always beat the shed-return
-one (5/1) regardless of distance so it could never misroute -- true for
-routing, but it broke something routing doesn't touch: `_decide_unit`'s
-direct-action shed-tile branch runs *before* a unit that just PICKUP'd
-FERTILIZER (to carry to a crop) has moved anywhere. With the unconditional
-version, that same turn's decision saw the freshly-picked-up FERTILIZER as
-"carried produce" and immediately DROPped it back -- a PICKUP/DROP livelock
-identical in shape to the animal-token livelock from the Animal husbandry
-(attempt 3) note, just for FERTILIZER instead of an animal, and far more
-damaging since fertilizer pickups happen constantly (WHEAT/CARROT/TOMATO/
-STRAWBERRY all use it): a 10-seed pool comparison with this version was a
-catastrophic regression across the board, e.g. mean money vs `random`
-collapsing from ~$36-38k to ~$2,290 and the win rate against the whole pool
-dropping from 83.3% to 23.3%. Restoring the `want_fertilizer` gate fixes
-it: a unit can only ever see carried FERTILIZER as sellable produce on a
-turn where fetching more of it for delivery wouldn't even be attempted in
-the first place. 10-seed pool comparison with the fix confirmed the
-livelock was the whole story and the underlying idea was sound: mean money
-rose ~20-26% against every non-adversarial pool opponent on top of the
-spatial-clustering gains above (e.g. `random` $40-44k -> $50-52k), the
-head-to-head against `reference/main_land_gate_60pct.py` held at a clean
-10/10-seed win with an even wider margin ($51,621 vs $22,970, up from
-$39,640 vs $22,698), and mean money against x492 rose ~37% ($24,583 ->
-$33,603) even though that matchup is still an outright loss on every seed.
-One accepted imprecision that survives both versions: the
-shed's FERTILIZER count is a single fungible pool for both collected (free)
-and market-bought stock, so `_build_fertilizer_orders`' own small standing
-reserve (`FERTILIZER_RESERVE = 2`) can occasionally get swept into a sell
-dump and get rebought next cycle -- a bounded, minor churn cost against a
-much larger potential revenue stream, not worth a separate reserved-vs-
-sellable split for 2 units.
+**Animals** (`_AnimalPlanner`, GOOSE/COW/SHEEP): every unit (farmer and
+hands alike) shares one decision function across crop and animal work, with
+FEED as the single highest priority of anything -- a missed feed costs the
+whole animal. `ANIMAL_LAND_SHARE = 0.18` targets owned-land share (matching
+the ~15-24% real top-ladder players run), further capped by
+`ANIMAL_MAX_PER_UNIT = 1.0` per hired farmer/hand so the target never
+outgrows the crew that has to tend both animals and crops -- a downloaded
+replay showed the land-share-only version growing to 14 structures against 7
+units, collapsing crop upkeep under the load. `ANIMAL_TARGET_SHARE` favors
+COW/SHEEP over GOOSE (COW $80/day, SHEEP $66.7/day, GOOSE only $50/day by
+product-value/production-interval; 5 real top-ladder replays never bought a
+single GOOSE either). `_animal_zone` reserves the N tiles closest to the
+shed for animal structures specifically, so they cluster tight around the
+shed the way real top-ladder replays do, instead of competing tile-by-tile
+with crops for the same near-shed land.
+Don't retry without new evidence: dedicating a fixed subset of hands to
+animals only (a severe net negative, ~-60 to -66% money -- fixed capacity
+allocation wastes turns whenever its zone doesn't have enough work to fill);
+raising `ANIMAL_LAND_SHARE`/`ANIMAL_MAX_PER_UNIT` together to chase a real
+correlation between opponents' animal share and their win rate against us
+(measured worse, -7% to -15% money, in a clean 30-seed A/B -- the
+correlation in the replay data is real but isn't simply "run more animals
+ourselves"; the leading open question is whether it's really about how
+efficiently those opponents convert flock into money, not flock size).
 
-Animal support (GOOSE/COW/SHEEP) was implemented and A/B tested
-(`reference/main_with_animals_v1.py`) and found to be a clear net negative --
-roughly a 70% cut to final money vs. this animal-free version, deterministic
-A/B vs. `starter` across 3 seeds -- even after fixing four real bugs along
-the way. The daily per-animal upkeep (FEED/CARE/COLLECT_FERTILIZER) competes
-for the same scarce farmer/hand turns as the much higher value/tile/day crop
-loop, and a single missed feeding cycle loses an entire $300-500 purchase
-outright. See that file's docstring for the full writeup before attempting
-this again.
+**Price-aware planting** (`_CropPlanner`): a crop currently priced below its
+own sell threshold is skipped for new planting (`_price_ok`) so land doesn't
+keep replanting into a market it just crashed, falling back to ignoring
+price only if every plantable crop is currently depressed. On top of that,
+`_score` weights each candidate crop by `PRICE_ATTRACTIVENESS_WEIGHT * (price
+/ base - 1)` so a crop trading well above base gets pulled toward the front
+of the queue instead of competing on target-mix-share gap alone.
+`PRICE_ATTRACTIVENESS_WEIGHT = 0.1` is a first-guess value, not yet tuned
+(see the next-steps memory).
 
-**Tried a second time, still reverted**: `reference/x492_nah_i_d_win.py`
-(see `scripts/pool_winrate.py`) runs animals profitably by never deciding
-about them live at all -- their placement/feed/harvest schedule is baked
-into a precomputed action tape offline, with no runtime turn-contention
-risk. Adapting that idea to this agent's reactive architecture, 2 of
-`MAX_HANDS`'s 6 hands were carved out as permanently dedicated animal
-hands, never touching a crop tile, specifically to remove the turn-
-contention failure mode above. It didn't help. A replay first caught a
-second, unrelated starvation cause even with dedicated hands: WHEAT is
-both a sellable crop and animal feed, and `_build_sell_orders` dumps the
-entire shed the moment its price clears threshold, so the shed sat at 0
-WHEAT for turns at a stretch -- fixed by buying feed WHEAT directly from
-the market, decoupled from the crop side. With that fixed too (animals no
-longer mass-starved), a 10-seed pool comparison was still a severe net
-loss across the board -- e.g. -66% mean money vs `random`, -62% vs
-`melon_maxxer` (which flipped from a 10/10-seed win to 6/10), -60% vs
-`starter` (9/10). The root cause was never actually "contention" or
-"starvation logistics" -- it's that 2 of 6 hands (a third of the crew) is
-too much crop-tending capacity to give up for what animals produce in a
-30-day season, at this agent's crop economics. Don't retry without first
-finding a much cheaper way to fund animal upkeep than a fixed hand tax.
+**Land / hands**: `_build_land_orders` gates each `BUY_LAND` on
+`LAND_UTILIZATION_GATE = 0.50` of currently-owned land already being
+planted, so cash doesn't buy land faster than it can be staffed. It's tuned
+between two failure modes found in real replays: too high (0.6) deadlocked
+this agent below its own achievable utilization ceiling (~48-56%) in most
+real games; too low regressed money 18-21% against the local pool by
+enabling oversupply before the crew could actually work the new land.
+`_land_worth_buying` additionally blocks a 4th-quadrant purchase outright --
+buying it doesn't raise hire capacity if the hiring formula is already
+capped, so it just dilutes the same crew across more tiles for no benefit
+(this matches how the pool's strongest opponent, x492, plays: it never buys
+past 3 quadrants either). `_hands_target` uses `HANDS_BASE +
+HANDS_PER_QUADRANT * quadrants` (5/8/11/12 hands at 1-4 quadrants),
+calibrated off real top-ladder hiring curves (which hire far more
+aggressively and far less land-proportionally than a flat formula) --
+raising `MAX_HANDS` alone without this shape change was tried earlier and
+measured worse (more hands means more simultaneous harvests crashing the
+same finite-demand market). `_quadrant_utilization` inflates a fresh PLANT
+candidate's effective distance by how built-up its quadrant already is, so
+a same-distance tie between a crowded and a neglected quadrant favors the
+neglected one -- crops were clustering near the shed and leaving distant
+land to weeds without this.
+Don't retry without new evidence: sizing hand count off a live count of
+actionable tiles instead of the flat quadrant formula (reproduces real
+players' fluctuating hire pattern, but over-hires during backlog spikes and
+costs more in oversupply than it saves, -3% to -34% depending on variant).
 
-**Tried a third time, kept**: downloaded top-ladder replays (the
-`georgymamarin/kaggriculture-episodes` community dataset, see
-`reference/community_dataset/`, plus `scripts/extract_replay_tape.py`)
-showed real players sizing animal structures as a steady ~15-24% of owned
-land throughout the season, gradually scaled with land bought -- not a
-fixed hand allocation like attempt 2. `_AnimalPlanner` now targets
-`ANIMAL_LAND_SHARE` (0.18, the middle of that observed range) of owned
-tiles, and there's no dedicated crew: every unit, farmer included, shares
-one decision function (`_decide_unit`/`_find_target`) across both crop and
-animal work, with FEED as the single highest priority of anything (a
-missed feed still costs the whole $300-500+ animal). Two real bugs
-surfaced building this, both now regression-tested:
-- A livelock: `PICKUP`-ing a bought animal token, then immediately
-  `DROP`-ping it back into the shed the same turn, forever -- the generic
-  "carried produce" auto-drop check didn't exclude animal tokens
-  (COW/SHEEP/GOOSE) the way it already excluded FERTILIZER/WHEAT, so a
-  freshly-picked-up animal got treated as sellable produce and dumped
-  right back.
-- A self-defeating target: when the shed had no WHEAT, a unit with none in
-  hand would still generate a "go to the shed" candidate at the highest
-  priority (more urgent than harvesting) to fetch feed -- and if that unit
-  was already standing on a shed tile, the candidate pointed at its own
-  position, so `_step_toward` returned nothing and it just `PASS`ed every
-  turn instead of doing any of the crop work sitting right next to it.
-  Fixed by only generating that candidate when the shed actually has WHEAT
-  to fetch.
+**Crop mix**: `CROP_TARGET_SHARE` = MELON 0.45 / WHEAT 0.25 / CARROT 0.15 /
+TOMATO 0.10 / STRAWBERRY 0.05. MELON dominates because its base price ($250)
+dwarfs the others and its price-crash risk is already handled by the
+price-aware-planting gate above -- cutting its share to make room for
+TOMATO/STRAWBERRY was tried and was a clean loss against every pool
+opponent. TOMATO/STRAWBERRY are "ongoing" crops (produce on a fixed
+multi-harvest schedule from one planting, no replanting between harvests);
+`_last_yield_day` extends their fertilization eligibility window to their
+real last production day, not just `max_yield_day` (a placeholder that
+undercounted it for these two).
+Don't retry without new evidence: shifting the mix hard toward STRAWBERRY
+specifically (inspired by real top-ladder replays that sustain much higher
+land utilization with it) was the single worst regression measured this
+project -- not a price crash (STRAWBERRY price kept rising) but a pure
+throughput failure, produce piling up in carried inventory and never
+reaching the shed to sell (see the shed-return-priority note below for the
+mechanism and why the direct fix also regressed). The insight that ongoing
+crops sidestep the seed-market-slot-starvation bug (below) is still
+plausibly correct; the crop-mix shift itself just exposed an execution gap
+this agent isn't equipped to capitalize on yet.
 
-Once genuinely working (no starvation, no idle land, no livelocks), the
-same replays gave one more data point: 5 of 5 downloaded top-ladder
-episodes (3 different players) never place a single GOOSE, despite it
-being the cheapest animal to buy. The economics explain why -- $/day per
-animal (product base price / production interval) is $80 for COW (MILK
-160/2), $66.7 for SHEEP (WOOL 200/3), only $50 for GOOSE (EGG 50/1), the
-worst of the three. `ANIMAL_TARGET_SHARE` was rebalanced to COW 0.60 /
-SHEEP 0.40 / GOOSE 0 to match. Setting a kind's target share to 0 alone
-wasn't enough, though, and briefly made results *worse*:
-`_AnimalPlanner.choose_structure`'s "which kinds still need a structure"
-filter checked only whether that kind's structure type had zero spares
-right now, not whether the kind was below its target share -- since GOOSE
-never gets built, its COOP count sits at 0 forever, so the instant
-COW/SHEEP's shared PASTURE type had a spare waiting, GOOSE became the
-*only* candidate left in the filtered pool and won by default regardless
-of its 0 share. Fixed by excluding 0-share kinds from that filter (and
-from `_build_animal_orders`'s purchase loop) directly. 10-seed pool
-comparison after both fixes: back in line with the no-animal baseline
-against the non-adversarial pool, and the best head-to-head result of any
-animal attempt against `reference/main_land_gate_60pct.py` -- 2/10 seeds
-won outright, mean money 18,051 vs 19,191 (a 0.94 ratio, vs. 0.60 with the
-GOOSE bug and 0.82 before any GOOSE fix at all). Still down against x492
-specifically (~-30% mean money vs. the no-animal baseline there) --
-x492's land/crop economy alone is strong enough that animal upkeep isn't
-worth the turns against it, even though it's a net-neutral-to-positive
-trade everywhere else measured.
+**Endgame liquidation**: as `days_remaining` shrinks, this agent stops
+buying seeds/land that can't pay back in time, prioritizes walking carried
+produce home over watering a crop that won't finish, and drops the
+sell-price threshold entirely so nothing sits unsold when the market closes
+(unsold inventory doesn't count toward final score). Carried FERTILIZER
+specifically also stops being re-fetched once liquidating and instead counts
+as sellable "produce" -- a unit was otherwise still walking to fetch more
+fertilizer for a crop with no season left to benefit from it. WHEAT's feed
+reserve is deliberately exempted from this -- missing a feed this late still
+loses the whole animal, a bigger loss than the travel time saved. (WHEAT
+itself is *not* currently exempted from the general "never counts as
+carried produce worth returning" exclusion even during liquidation, unlike
+FERTILIZER -- a real, still-open gap, see the next-steps memory.)
 
-**Spatial clustering (animals), addressed**: the same top-ladder replays
-place animal structures in a tight cluster immediately around the shed,
-leaving crops the rest of the map edge-to-edge -- plausibly because FEED
-is daily and unmissable, so keeping every animal within a short walk of
-the shed (where feed/product pickup and drop already happen) minimizes
-the turns the whole feeding round costs. This agent had no such geometric
-preference: `_find_target`/`_decide_unit` treated "nearest empty tile"
-identically whether a crop or a structure wanted it, so animals and crops
-competed for the same near-shed tiles instead of animals deliberately
-claiming the center and crops spreading outward. `_animal_zone` now
-reserves the N empty tiles closest to the shed (N = however many
-structures `_AnimalPlanner` still needs to reach its land-share target)
-for BUILD_PASTURE/BUILD_COOP specifically; crop planting is skipped on
-those reserved tiles (falling through to the next-nearest empty tile
-instead), and any structure need beyond the zone still falls back to
-whatever empty tile is nearest, same as before. This was the real
-bottleneck behind attempt 3's lukewarm head-to-head result above, not
-animal husbandry itself: 10-seed pool comparison after adding the zone
-jumped from a 2/10-seed head-to-head win against
-`reference/main_land_gate_60pct.py` (0.94 money ratio) to a clean 10/10,
-1.69 ratio ($38,125 vs $22,621), and mean money against the whole
-non-adversarial pool rose ~40% across the board (e.g. $25k -> $36-38k vs
-`random`/`starter`/`melon_maxxer`). Even against x492 (still an outright
-loss, 0/10 seeds) our own money more than doubled ($9,826 -> $21,220).
-Plausibly compounds with the pre-existing tile-clustering gap below (which
-remains unaddressed -- this only reserves land for animals, it doesn't
-spread crops outward on its own).
+**Neglected-tile urgency**: a tile that missed watering once
+(`consecutive_unwatered >= 1` -- two consecutive misses turns a PLANT into a
+WEED) scores priority 0.5 in `_find_target`, above every routine chore but
+below harvest (already-earned money) and still below at-risk situations.
+Without this, a unit chasing a marginally-closer routine chore near the shed
+would keep winning over saving a tile one missed watering from being lost
+outright. Paired with raising `MAX_HANDS` 6 -> 8 (which conveniently matches
+2x the 4-quadrant land cap, so it stops binding at all) to recover a
+capacity dip the priority change caused on its own.
 
-**Animal capacity vs crop capacity**: a downloaded replay of this agent's
-own 2026-08-18 submission (won 42,321 vs 39,457, but by less than it
-should have) showed why: `ANIMAL_LAND_SHARE` sizes the animal-structure
-target purely off land owned, with no regard for how many units exist to
-tend both the animals *and* the crops. By day 20 (3 quadrants, 75 tiles)
-the target had grown to 14 animal structures against a crew of only 7
-units (farmer + `MAX_HANDS`'s 6 hands) -- and crop upkeep visibly
-collapsed under the load: NW's planted-tile count fell from ~17 (day 12)
-to 2-3 (day 28), and NE accumulated 3-4 weeds that were never cleared for
-the rest of the season. The same replay showed only 2 hands hired on day
-0-6 (the flat `2 * quadrants` formula, correctly sized for 1 quadrant) even
-though the land-share target already wanted 4-5 animal structures by day
-2 -- not a hiring bug, the animal side was simply sized without reference
-to how few hands existed yet to run it. Fixed with `_animal_target`, which
-now caps the live-animal count at the *smaller* of the land-share target
-and `ANIMAL_MAX_PER_UNIT` per currently-hired farmer/hand (shared by
-`_AnimalPlanner` and `_build_animal_orders` so both always agree).
-`ANIMAL_MAX_PER_UNIT` started at 1.0 tiles/unit as a first guess pending
-pool validation -- see whether that number changed below. This also
-substantially resolved the spatial-clustering "drift" gap noted above
-without any change to `_animal_zone` itself: a local same-code replay (30
-days vs `starter`) that previously would have grown to a much larger
-target now ends the game with 7 structures instead of 14, and their max
-distance from the shed dropped from 6 tiles to 4 (3 of 7 sit directly on
-the shed ring). Smaller total target simply means `_animal_zone` never has
-to reach as far to find its N-closest empty tiles. The same replay's crop
-health held up far better too -- NW stayed at 15-17 planted tiles through
-day 20 instead of collapsing to 2-3 by day 28. Didn't pursue a dedicated
-anticipatory-reservation fix for the residual drift given how much smaller
-it already is; revisit only if a future replay still shows it mattering.
+**Shed-return priority**: `_find_target`'s priority for walking carried
+produce back to the shed is normally the worst tier (5, below even routine
+watering/weeding) -- fine under a diversified crop mix, but a unit carrying
+produce under a dense, continuously-cycling crop (see the STRAWBERRY note
+above) never won the race home against a steady stream of priority-0 harvest
+candidates elsewhere, so produce piled up in carry and never got sold.
+Raising the priority unconditionally for every carrying unit was tried and
+regressed (a unit carrying just 1-2 units started abandoning weeding and
+boosted planting too readily to cash out early). The fix that stuck:
+`SHED_RETURN_URGENT_PRIORITY = 2` only once a unit is carrying at least
+`CARRIED_PRODUCE_URGENT_THRESHOLD = 3` units -- a light load still finishes
+a nearby routine chore first, a real backlog heads home. Validated with a
+clean sequential 30-seed full-pool comparison (144W-66L -> 146W-64L overall,
+the two genuinely close matchups splitting +3/-1 rather than uniformly
+worse) plus a same-process A/B against the pool's two most decisive
+opponents (+6.6%/+8% money, win rate already saturated at 30/30 and 0/30
+either way).
 
-**Price-aware planting**: MELON's price curve is punished quadratically for
-oversupply above equilibrium (`data/README.md`'s Price Function, the `sq`
-above-target shape -- the steepest in the whole table) and only recovers
-~1 unit/day: no town shop demands MELON, only the flat town-center trickle
-(`data/README.md`'s Town Buildings table). A replay showed `_CropPlanner`
-kept spending its 50% target share on MELON turn after turn right after a
-big sell dump had just crashed its price (250 -> 86 base over one season,
-seed 1 vs `starter`) -- replanting straight back into a market it had just
-flooded. `_CropPlanner.choose` now skips a crop from consideration while
-its current price is below the same threshold `_build_sell_orders` already
-uses to decide whether to sell it, falling back to ignoring price only if
-every plantable crop is currently depressed (so land never sits idle over
-a temporary dip).
+**Market-order-slot starvation: real, confirmed, and currently unfixed --
+don't blind-retry.** `agent()`'s market order list is built
+sell -> land -> hire -> feed -> seed -> fertilizer -> animal, then silently
+truncated to `maxMarketOrdersPerTurn` (10). `_build_feed_orders` (one
+`BUY_PRODUCT WHEAT` order per unit needing feed, sometimes 8-9 orders alone)
+routinely crowds out `BUY_SEED`/fertilizer orders most turns, confirmed
+directly in replay `action.market` data and a real cause of planted-tile
+counts collapsing over the back half of a season despite idle cash. Five
+independent fix attempts across this project (full order consolidation
+twice, an order-count cap, a WHEAT sell-side reserve, a per-order quantity
+cap) all measured as real regressions on a clean same-process 30-seed A/B,
+consistently worst against a genuine non-mirror opponent
+(`reference/tape_kiro.py`) -- the likely mechanism is that this agent's own
+per-unit affordability check uses a static price and doesn't account for the
+engine's own within-order price walk, so any change that lets a turn request
+more WHEAT in fewer, larger orders ends up spending more at a worse average
+price than the old scheme's incidental slot-count cap ever allowed. Treat
+this as settled without new instrumentation (e.g. tracking realized purchase
+prices turn-by-turn, old vs. new, in the same replay) -- not a queue of
+ideas still worth blind-testing.
 
-**Price-attractiveness-aware planting**: `_price_ok` above is a binary
-pass/fail gate, and once a crop clears it, price stopped mattering at all
--- `choose` picked purely by target-mix-share gap. A downloaded replay of
-this agent's own 2026-08-18 submission showed the real cost of that: by
-day 17-18, STRAWBERRY's price had climbed to 2.0-2.1x its base (well above
-its 0.55 sell threshold) while MELON sat at ~0.98x its own base (barely
-above its 0.65 threshold) -- and MELON still got planted *more* often than
-STRAWBERRY in that window, because MELON's dominant 45% target share gives
-it a bigger raw share-gap almost by construction, drowning out how much
-more attractive STRAWBERRY's price actually was right then. `_CropPlanner`
-now scores each candidate crop by its target-share gap *minus*
-`PRICE_ATTRACTIVENESS_WEIGHT * (price / base - 1)` (see `_score`), so a
-crop trading well above its base price gets pulled toward the front of the
-queue instead of only ever competing on mix-share alone.
-`PRICE_ATTRACTIVENESS_WEIGHT` started at 0.1 as a first guess -- see the
-Land utilization gate's "nudged back up" note below for the combined
-10-seed pool result (this, the gate bump, and the fertilizer-liquidation
-fix below were all measured together in one pass, not in isolation).
+**Seed reserve**: `SEED_RESERVE = {"MELON": 3, "WHEAT": 3, "CARROT": 3,
+"TOMATO": 2, "STRAWBERRY": 2}` scales up per-crop by
+`SEED_RESERVE_PRICE_CAP = 2.0` when that crop's own price sits above its
+base (mirrors the price-attractiveness planting logic, applied to how far
+ahead of need to buy rather than what to plant right now) -- validated
+within noise of the unmodified baseline against the local pool, and a clean
++27% money win against `reference/tape_kiro.py`.
+Don't retry without new evidence: doubling every crop's flat reserve
+uniformly (to give `_build_seed_orders` more runway on the rare turn it
+wins a market slot) was the single worst regression measured in this
+project before the STRAWBERRY-mix one above -- it drove enough more WHEAT
+through the crop cycle to blow up the WHEAT sell/rebuy round trip's volume
+(see below) far past its normally-bounded cost.
 
-**Land utilization gate**: `_build_land_orders` used to buy the next
-quadrant purely on cash available, with no regard for whether the land
-already owned was even being worked. A replay showed this agent buying its
-4th quadrant (all 100 tiles) by day 11 while plateauing at ~40-48% of
-tiles actually planted for the rest of the season.
-`reference/x492_nah_i_d_win.py` (the strongest agent in the pool, see
-`scripts/pool_winrate.py`) never buys that 4th quadrant at all -- it stops
-at 3 (75 tiles) and holds ~70-73% utilization there instead, ending the
-same paired-seed season with far more money. `_build_land_orders` now
-gates each new `BUY_LAND` on the current quadrant(s) already being at
-least `LAND_UTILIZATION_GATE` planted -- buying land faster than it can be
-staffed just leaves it idle. **A companion fix was tried and reverted**:
-`MAX_HANDS = 6` (a self-imposed number, not a game rule -- hiring is
-nearly free, fib-cost/day per `data/README.md`'s Hiring section) looked
-like the reason utilization plateaued, and x492 itself runs up to 12
-hands, so `MAX_HANDS` was raised to 12 with hires scaled to match.
-Measured instead, 10-seed pool comparison: the land gate alone was a clean
-win against every pool opponent (e.g. +21% mean money vs `random`, +41% vs
-x492), while adding the raised hand cap on top made it *worse* than the
-gate alone almost everywhere (still better than doing nothing, just a
-smaller gain) -- more hands means more simultaneous harvests dumped into
-the same finite-demand market, which crashes prices faster than the extra
-fib-scaling hire cost pays back. `MAX_HANDS` and the hire formula are back
-to their original values; only the land gate stuck.
+**Price-reactive fertilizer buying**: `_build_fertilizer_orders` keeps a
+flat `FERTILIZER_RESERVE = 2` most of the time, but stocks up to
+`FERTILIZER_STOCKPILE_RESERVE = 10` whenever price drops to
+`FERTILIZER_CHEAP_PRICE_FRAC = 0.35` of base or below (deliberately under
+`SELL_PARAMS["FERTILIZER"]`'s own 0.50 sell threshold, so it can never buy
+back at a price it would also sell at) and something is actually
+fertilizable right now. Motivated by real animal-heavy opponents (e.g.
+`reference/tape_kiro.py`) who dump so much byproduct fertilizer that its
+price crashes to a fraction of base. Confirmed a no-op (not a regression) in
+every locally measured matchup so far, including a corrected replay of that
+exact opponent -- FERTILIZER does get cheap there, but the stockpile order
+never wins a market slot in the first place, another casualty of the
+slot-starvation bug below. Kept as a small, gated, provably-safe change; not
+yet validated as an actual win.
 
-**The gate's own threshold was recalibrated after real Kaggle replays
-exposed a deadlock**: `LAND_UTILIZATION_GATE` originally shipped at 0.6.
-Downloaded replays from actual leaderboard games (`scripts/
-extract_replay_tape.py`) showed this agent's *own* achievable utilization
-plateauing at ~48-56% across every real opponent -- consistently just
-below the gate -- so it stayed permanently stuck at 2 of 4 quadrants for
-the entire 30-day season in 3 of 4 real games, never recovering even with
-$25k+ sitting unused. Against weak pool opponents this was invisible (this
-agent still wins by a huge margin off 2 quadrants alone), but it's a real
-cost against a contested market -- go watch `reference/main_land_gate_60pct.py`
-lose that same land race. Lowered to 0.45 (below the observed ceiling, so
-it can't deadlock) fixes that: reliably reaches all 4 quadrants now.
-**But lowering the threshold alone was a real trade-off, not a clean fix**:
-10-seed pool comparison showed -18 to -21% mean money against every
-non-adversarial pool opponent and -39% against x492 -- the same oversupply
-dynamic as the reverted `MAX_HANDS` experiment above, and a head-to-head
-against `reference/main_land_gate_60pct.py` (identical except that one
-constant) was a 1/10-seed *loss*, -34% mean money. A head-to-head replay
-found why: the hire formula (`2 * quadrants`, capped at `MAX_HANDS = 6`)
-already maxes out hire capacity at 3 quadrants (2*3 = 6) -- the 4th
-quadrant *never* unlocks another hand under it, so buying it just spreads
-the same crew across 25 more tiles. The replay showed the 0.45 agent
-planting no more tiles in absolute terms with 4 quadrants than the 0.6
-agent did with 3 -- diluted thinner, plus $4,000 spent on land with no
-extra hands to work it. `_land_worth_buying` now blocks a `BUY_LAND` that
-wouldn't raise the hire-formula's hand cap, capping this agent at 3
-quadrants outright (independent of `LAND_UTILIZATION_GATE`, which still
-gates 1->2 and 2->3, both of which *do* raise hand capacity) -- matching
-what `reference/x492_nah_i_d_win.py` (the strongest agent in the pool)
-does on its own. Recovered most of the trade-off: back within +/-7% of
-the original 0.6 baseline against every non-adversarial pool opponent
-(and still +59% against x492 vs. that baseline), and the head-to-head loss
-against `reference/main_land_gate_60pct.py` narrowed from -34% to -13%
-mean money -- better, but still a loss, so some gap remains unexplained
-(oversupply from selling faster once 3 quadrants comes sooner, and/or the
-spatial pathing bias below, are the leading suspects). Kept
-`reference/main_land_gate_60pct.py` in `scripts/pool_winrate.py`'s default
-pool to keep tracking whatever's left of this gap.
-
-**The gate nudged back up, slightly**: a downloaded replay of this agent's
-own 2026-08-18 submission showed the 3rd quadrant bought at exactly 46%
-utilization of the first two -- technically past the 0.45 gate, but by a
-margin thin enough to read as "barely earned it" rather than genuinely
-ready. Raised to 0.50: still comfortably below the ~48-56% achievable-
-utilization ceiling observed in real replays (where 0.6 deadlocked), just
-less borderline than 0.45. 10-seed pool comparison with this, the price-
-attractiveness change above, and the fertilizer-liquidation fix below all
-bundled into one pass (not isolated per-change): a mixed, honest result --
-mean money against the non-adversarial pool *dipped* modestly (e.g.
-`random` $60.5k -> $56.1k, `starter` $59.7k -> $51.9k), within the range
-of this project's known run-to-run variance at a fixed seed count, but the
-head-to-head against `reference/main_fertilizer_selling_submitted_
-20260817.py` (yesterday's actual Kaggle submission) improved from 6/10 to
-8/10 seeds won, and the money ratio against it from 1.05x to 1.19x. POOL
-TOTAL win count also ticked up (56/70 -> 58/70). Read cautiously: three
-changes landed in one measurement, so this doesn't isolate which of them
-(if any) is pulling the weak-pool number down -- worth re-splitting and
-re-measuring individually if a future session revisits this area.
-
-**Task-driven hiring, tried and reverted**: real top-ladder replays
-(`scripts/extract_replay_tape.py`/the community episode dataset, see
-`reference/community_dataset/`) showed hand count tracking actual pending
-work turn to turn -- zero hands hired on a day with nothing to do but wait
-for wheat to grow and tend animals solo, five hired the moment a real
-backlog existed -- not the flat `2 * quadrants` formula this agent uses.
-Replaced `_build_hire_orders` with one counting actionable tiles right now
-(unwatered/harvestable plants, weeds, optionally plantable-with-seed-budget
-empty tiles) and sizing the crew to clear that backlog by
-`TASKS_PER_HAND`. It reproduced the real pattern -- hand count genuinely
-fluctuated day to day instead of stepping through fixed quadrant
-thresholds -- but measured worse in every variant tried: -3 to -6% mean
-money against the non-adversarial pool and -15% against x492 counting
-plantable tiles as tasks; dropping plantable tiles from the count (hiring
-only for water/harvest/weed maintenance) was worse still, -34% in the
-head-to-head against `reference/main_land_gate_60pct.py` (vs. -13% for the
-simple quadrant-cap formula it replaced). Both variants hired more
-aggressively during genuine backlog spikes (freshly bought land, a batch
-of crops maturing together) than the flat formula ever did, which is
-exactly the same oversupply pattern as every other "hire/produce more"
-experiment in this file's history -- more simultaneous harvests than the
-market (or the sell logic below) can absorb without crashing the price.
-Reverted to the flat formula; the real pattern is genuine, but replicating
-it costs more in oversupply than it saves in idle-hand hire fees at this
-agent's current selling strategy.
-
-**Spatial clustering (crops), addressed**: a replay showed planted tiles
-clustering heavily near the shed (the NW quadrant dense and harvest-ready,
-the NE quadrant mostly empty or gone to weed) rather than spreading evenly
-across owned land. `_find_target`'s nearest-candidate-wins selection
-created this bias -- once a unit settled into tending nearby tiles, a
-marginally-closer chore in the already-established area kept winning over
-walking further out to work distant land, even when it was sitting idle.
-`_quadrant_utilization` now tracks each quadrant's own planted fraction,
-and a fresh PLANT candidate's distance in `_find_target` gets inflated by
-`quadrant_util[q] * (board_size // 2)` -- a same-distance choice between a
-crowded and a neglected quadrant now goes to the neglected one, while a
-much-closer tile in the crowded quadrant can still win outright (it's a
-nudge on ties/near-ties, not a hard override, so it doesn't force units to
-walk past everything nearby chasing the single least-planted quadrant).
-10-seed pool comparison on top of the animal-zone fix above: win/loss
-record held (still 50/60 seeds, 83.3%, already saturated against the
-non-adversarial pool) but mean money climbed further across nearly every
-opponent -- +10 to +20% vs `random`/`starter`/`checkpoints/v0`/
-`melon_maxxer` ($36-38k -> $40-44k), +16% vs x492 despite still losing
-every seed there (its own money also grew a comparable amount, so the
-underlying land-race gap wasn't closed, just both sides scaled up).
-
-**TOMATO/STRAWBERRY**: this agent only ever grew the three one-time crops
-(MELON/WHEAT/CARROT). `data/README.md`'s Harvest Yields section documents
-two more, TOMATO and STRAWBERRY, as *ongoing* crops -- once planted they
-keep producing on a fixed schedule (tomato at ages 8/9/10/11, strawberry at
-10/12/14/16) without needing to be replanted between harvests, unlike a
-one-time crop's single payout. `_is_harvestable`/`_decide_unit`'s generic
-PLANT-tile field checks (`yield_units`, `watered_today`) already handle
-this correctly with no changes -- the engine keeps the tile alive after
-HARVEST for an ongoing crop instead of clearing it, and just keeps refilling
-`yield_units` on schedule, so a unit that waters an ongoing-crop tile daily
-and harvests whenever `yield_units > 0` was already the right behavior.
-Both are now in `CASH_CROPS`/`SELL_PARAMS`/`SEED_RESERVE`. **Measured, not
-assumed, how much of MELON's share to give them**: the obvious-looking move
-was cutting MELON's dominant 0.5 share hard to make room (it's the crop
-whose price crashes quadratically, per the Price-aware planting note
-above) -- 10-seed pool comparison showed that alone (MELON 0.35, no
-tomato/strawberry, redistributed to WHEAT/CARROT) was a *clean loss*
-against every pool opponent, including x492. MELON's price gate already
-protects it from replanting into a crashed market, so de-emphasizing it
-further just traded away its far-higher base price ($250 vs WHEAT's $25)
-for nothing. What actually pays off is adding TOMATO/STRAWBERRY as a small
-addition without touching MELON much: `CROP_TARGET_SHARE` settled at
-MELON 0.45 / WHEAT 0.25 / CARROT 0.15 / TOMATO 0.10 / STRAWBERRY 0.05 --
-roughly flat (+/-2%) against every weaker pool opponent and +33% mean
-money against x492 (their gentler above-equilibrium price curves, `sqrt`/
-`linear` vs MELON's `sq`, pay off specifically when the market is
-contested). Fertilizing them was initially left out: `_is_fertilizable`'s
-eligibility window used `CROPS[crop]["max_yield_day"]` as an upper bound,
-which for these two crops equals `first_yield_day` (a placeholder value,
-not "last production day"), so reusing it as-is would only ever allow
-fertilizing the *first* scheduled production and silently miss the rest.
-Fixed with `_last_yield_day`, an ongoing-crop-aware bound
-(`first_yield_day + (max_yield - 1) * interval`, matching the real
-schedule -- tomato through age 11, strawberry through age 16); both are
-now in `FERTILIZE_CROPS` too. 10-seed pool comparison: a clean win
-everywhere, +2 to +7% mean money with no regressions (largest gain against
-x492, +7%, where every bit of yield matters most).
+**WHEAT sell/rebuy round trip**: `_build_sell_orders` dumps the entire shed
+including WHEAT the moment its price clears threshold; `_build_feed_orders`
+then immediately rebuys WHEAT from the market for animal feed -- a real,
+confirmed, self-inflicted round trip through both sides of the market's own
+price impact. Real top-ladder replays do the exact same thing constantly and
+profit from it (WHEAT nets +9% to +88% of their final money), within a much
+tighter price band (buys 1.00x-2.08x base, sells 1.08x-2.08x) than this
+agent's own 0.45x sell threshold / 5.0x feed-buy cap.
+Don't retry without new evidence: holding back a standing WHEAT reserve from
+the sell dump (three sizes tried) looked like a clean win on quick 10-seed
+checks but was a genuine large regression on a properly-powered 30-seed
+recheck (83.3% -> 53.3% win rate against the pool's toughest opponent) --
+delayed reinvestment barely dents a blowout against weak opponents (ceiling
+effect hides the cost) but flips close races where marginal efficiency
+decides the outcome. A random-search sweep of `WHEAT_SELL_THRESHOLD` /
+`FEED_MAX_PRICE_FRAC` within the real observed range didn't find anything
+that held up at 30 seeds either, though it did surface a hard floor worth
+remembering: `FEED_MAX_PRICE_FRAC` below ~1.4 can't clear the price often
+enough to feed animals at all (catastrophic, animals lost outright) --
+today's 5.0 has plenty of headroom above that. The round trip itself is
+still real and still unaddressed; a smaller-footprint idea (coordinating the
+sell and feed decisions within the same turn instead of a standing reserve)
+is worth trying before another reserve-sizing attempt.
 
 Still out of scope: any opponent modeling -- this agent only ever reacts to
 its own farm/market state. See rl/README.md for the parallel (currently
-stalled) attempt at a learned policy.
-
-**Endgame liquidation**: unsold shed contents (and anything still sitting in
-a farmer/hand's personal inventory) don't count towards the final score --
-see data/README.md's Reward section. Everything above ignores that until
-close to the last day, so this agent also tracks `days_remaining` (from
-`config["episodeSteps"]`/`config["turnsPerDay"]`, which `kaggle_environments`
-does pass through -- confirmed via `agent.py`'s `co_argcount` inspection) and,
-as the season winds down: stops buying seeds/land that can't pay back in the
-time left, has units prioritize walking harvested produce back to the shed
-over watering a crop that won't finish in time, and drops the sell-price
-threshold entirely so nothing is still sitting unsold when the last turn's
-market closes.
-
-**Endgame liquidation (fertilizer)**: the above wasn't catching everything.
-A downloaded replay of this agent's own 2026-08-18 submission showed
-real, steady dollar value sitting in unit inventories all game long (not
-growing unboundedly, just a persistent "in transit" pipeline -- WHEAT
-reserved for feed, FERTILIZER en route to a crop, freshly harvested animal
-products not yet dropped off) -- roughly $3,500-4,500 worth at any given
-sampled turn, including the very last one, where it's permanently lost
-(doesn't count toward the score). Some of that is an unavoidable tail cost
-of any continuous-production pipeline that has to stop somewhere mid-
-cycle, but the FERTILIZER slice of it wasn't: once `liquidating`, a unit
-would still walk to the shed to fetch *more* FERTILIZER for a crop that,
-by definition, has little season left to benefit from it -- a pure waste
-of travel time this late. Fixed by gating new fertilizer-delivery pickups
-on `not liquidating`, and letting already-carried FERTILIZER count as
-sellable "produce" once liquidating even if some crop is nominally still
-fertilizable (see `_find_target`'s `carrying_produce`/`_decide_unit`'s
-`carried_produce`). WHEAT's feed reserve is deliberately left untouched --
-missing a feed this late still loses the whole animal outright, a bigger
-loss than the travel time saved.
-
-**Neglected-tile urgency**: the "canto distante perdendo cultura" gap
-(the pre-existing tile-clustering note above, and the specific NW/NE
-neglect the animal-capacity fix addressed) has one root cause left after
-both of those: `_find_target`'s water candidates all shared one priority
-regardless of how close a tile actually was to becoming a WEED, so a unit
-chasing a marginally-closer *routine* chore near the shed could keep
-winning over walking out to save a tile one missed watering from being
-lost outright, no matter how the spatial-balancing fixes above steered
-planting. Considered and rejected first: a dedicated unit for distant
-tiles, the user's own first suggestion -- this project already measured
-that exact shape of fix for animals (2 of 6 hands walled off, Animal
-husbandry attempt 2) and it was a severe net negative (-60 to -66%
-money): fixed allocation wastes capacity whenever its designated zone
-doesn't have enough work to fill every turn. Went with priority instead:
-a tile with `consecutive_unwatered >= 1` (kaggriculture.py -- missing
-water two days running turns a PLANT into a WEED, and even a fresh
-planting starts pre-loaded at 1, "the planting day counts as unwatered")
-now scores 0.5 instead of the routine `water_priority`, just below
-harvest's own 0 (already-earned money is never worth delaying for a tile
-that would only avoid a *future* loss) but above every other routine
-chore. Measured across three passes, honestly mixed rather than a clean
-win: the fix alone (10-seed pool) dipped mean money modestly against most
-of the non-adversarial pool (e.g. `random` $56.1k -> $52.9k) and the
-head-to-head against yesterday's frozen submission snapshot from 8/10 to
-7/10 seeds -- plausibly because a 7-unit crew managing 75+ tiles hits
-`consecutive_unwatered >= 1` often enough that it's closer to routine load
-than a rare emergency, so reprioritizing what an already-saturated crew
-does doesn't clearly help on its own. Paired with raising `MAX_HANDS` 6 ->
-8 (a modest re-try, not the 12 already measured worse pre-animal-cap/
-fertilizer-selling -- see `_land_worth_buying`'s own docstring) recovered
-most of the gap: back to 8/10 seeds against the frozen snapshot, and
-`random`/`main_land_gate_60pct.py` both ticked back up. Kept on balance --
-still not a clean statistical win in this specific pool, but it fixes a
-real, replay-diagnosed correctness gap (crops actually dying to neglect)
-that a few thousand dollars of pool noise shouldn't override, and
-`MAX_HANDS=8` conveniently exactly matches 2 * the 4-quadrant land cap,
-so it stops being a binding constraint at all rather than an arbitrary
-bump. Most matchups in this pool never actually reach a fully-utilized
-4th quadrant within 30 days, so this pairing is under-exercised by the
-current pool roster -- a stronger test would need an opponent that
-reliably pushes the game there.
-
-**Real hiring pace, superseding the MAX_HANDS=8 pairing above**: asked to
-analyze hand counts in the same downloaded top-ladder replays (3 games,
-same #1 player), not just money/production. The flat `2 * quadrants`
-formula wasn't just under capped, it was the wrong *shape* -- real hiring
-isn't proportional to land at all: 5 hands on day 0 with only the
-starting NW quadrant, 12 by day 9 with just 2 quadrants, settling at
-10-12 for the rest of every season regardless of reaching all 4
-quadrants. `_hands_target` now uses `HANDS_BASE + HANDS_PER_QUADRANT *
-quadrants` (5/8/11/12 at 1-4 quadrants) instead of `2 * quadrants`
-(2/4/6/8 under the old MAX_HANDS=6, capped at 6/8 either way) -- close to
-the observed curve at 1 and 4 quadrants, still short at 2-3 but a large
-step up from before, and deliberately kept strictly increasing through
-all 4 quadrants so `_land_worth_buying` never blocks the last one. This
-looks like exactly the kind of change a previous pass already measured as
-worse (`MAX_HANDS` raised to 12 "with hires scaled to match" -- see the
-Land utilization gate note above): more hands dumping more simultaneous
-harvests crashed crop prices faster than the extra fib-scaling hire cost
-paid back. Retried anyway because two things changed since that measurement:
-the animal-capacity cap now caps how much of the crew's harvest volume is
-animal product, and fertilizer selling opened a revenue channel that
-doesn't compete in the same crop markets at all. The retry decisively
-confirms the economy really did change: 10-seed pool comparison, mean
-money up 16-41% across every non-adversarial pool opponent on top of
-every earlier gain this session (e.g. `random` $54.5k -> $72.1k, `starter`
-$52.3k -> $73.5k), and the head-to-head against yesterday's frozen
-submission snapshot improved to 9/10 seeds won (from 8/10). The Neglected-
-tile urgency fix and this hiring-pace change were kept together, not
-re-isolated -- both are independently well-motivated by the same replay
-evidence, and untangling their individual contributions wasn't worth
-another measurement pass given how clearly positive the combination is.
-
-**Sell/rebuy round trip on WHEAT -- fix attempted and reverted**:
-`_build_sell_orders` and `_build_feed_orders` read the same shed WHEAT
-with no coordination -- sell dumps the *entire* shed stock the moment
-price clears its 0.45x threshold with no notion that animals need some of
-it, then feed buys straight back from the market (a near-nonbinding
-backstop, willing to pay up to 5x base -- missing a feed loses the whole
-animal, so `FEED_MAX_PRICE_FRAC` is deliberately loose) as soon as the
-shed reads empty again -- a real, self-inflicted round trip through both
-sides of the market's own price impact, confirmed happening in a
-downloaded replay. Tried fixing it by having `_build_sell_orders` hold
-back a WHEAT reserve from the dump; three sizes were tried (a 2-day
-buffer matching `_build_feed_orders`'s own trigger, a 1-day buffer, and a
-small flat cap of 4 units decoupled from flock size), each looking
-better than the last on quick 10-seed pool checks -- but that whole
-trail turned out to be chasing partly-noisy signal, not a real
-improving trend (see the next note). A properly-powered recheck (30
-seeds, pre-fix and post-fix run back-to-back in the same process against
-`reference/main_fertilizer_selling_submitted_20260817.py`, the pool's
-strongest and most competitive opponent) told a different story: pre-fix
-25/30 (83.3%), post-fix (the "best" flat-cap-4 version) 16/30 (53.3%) --
-a genuine, large regression, not the honest-trade-off it first looked
-like. Plausible mechanism: holding back even a small reserve delays
-reinvestment (the same mechanism the per-turn-sell-cap revert above
-already demonstrated), which barely dents a blowout win against weak
-pool opponents (still 100% win rate, ceiling effect hides the cost) but
-flips close races against a closely-matched opponent where marginal
-efficiency actually decides the outcome. Reverted `_build_sell_orders`
-back to taking no reserve argument at all -- same pattern as
-`_build_animal_orders`'s own "Known bug" note below: a theoretically
-correct fix that measured worse and got reverted rather than shipped on
-faith. The underlying round trip is still real and still unaddressed;
-worth another look with a smaller-footprint idea (e.g. coordinating the
-sell and feed decisions within the same turn instead of a standing
-reserve) and, per the next note, with a large enough seed count to trust
-the result.
-
-**A real non-determinism in the eval harness was found investigating the
-above, and it changes how every pool comparison in this project should
-be read.** `kaggle_environments`' `seed` config does properly determinize
-the one RNG source inside the kaggriculture interpreter itself (weed
-spawning, keyed off `seed` and `day` -- see kaggriculture.py's
-`_end_of_day`), and neither `main.py` nor any reference agent calls
-`random` directly, so identical code given an identical seed *should* be
-fully reproducible. It measurably isn't: rerunning the exact same 10-seed
-script (no code change at all) gave 9/10, 9/10, then 7/10 across three
-attempts, with the 7/10 outlier appearing specifically when it ran
-concurrently with another heavy background episode batch -- and,
-separately, the *same* 10-seed matchup scored differently depending on
-whether it was the only thing a script ran versus the last of 50
-episodes in a single `pool_winrate.py` invocation, even with nothing else
-running on the machine at the time. Root cause not fully pinned down
-(the `actTimeout: 1` per-turn wall-clock config is a plausible
-suspect -- our own `agent()` call measures ~0.2ms in isolation, comfortable
-headroom, but that headroom could erode under CPU contention or
-within-process memory/GC pressure over a long-running multi-episode
-script), but the practical takeaway is solid either way: **a single
-10-seed comparison has a real noise floor around +/-2 seeds out of 10**,
-enough to make a fix look clearly better or clearly worse than it
-actually is (exactly what happened chasing the WHEAT-reserve sizes
-above). Treat any single 10-seed `pool_winrate.py` result with real
-skepticism going forward -- rerun it, or use a larger seed count (the
-30-seed script that caught this regression is the model to follow), for
-any comparison a real decision rests on. Running pool comparisons one at
-a time rather than concurrently with other heavy background work is
-still good hygiene, but per the 50-episode-vs-10-episode finding above,
-isolation alone isn't a full guarantee.
-
-**Top-ladder WHEAT price range checked, didn't translate into a win**:
-asked whether top-ladder replays (`replays/top_ladder/`, 5 games) avoid
-the round trip above some other way. They don't -- they do it constantly
-(71-248 buy orders and 38-199 sell orders per game per player) and it's
-net *profitable* for them (WHEAT nets +9% to +88% of final money for 9 of
-10 player-games analyzed), which on its own says the round trip isn't
-inherently a losing pattern. The mechanistic difference: every observed
-buy across all 5 replays landed at 1.00x-2.08x base, every observed sell
-at 1.08x-2.08x -- both far tighter than this agent's 0.45x sell threshold
-and 5.0x feed-buy cap. Ran `scripts/mc_search.py --params
-WHEAT_SELL_THRESHOLD FEED_MAX_PRICE_FRAC` (30 trials, scoped to just the
-`main_fertilizer_selling_submitted_20260817.py` matchup to avoid x492's
-unwinnable-regardless-of-tuning result flooring every win rate) to look
-for a better pair within that observed range. Two candidates hit a
-misleadingly perfect win_rate=1.00 at the search's own 5-seed sample
-(threshold=1.242/feed=2.62 and threshold=1.545/feed=3.19) -- but neither
-held up at 30 seeds, the same lesson as the note above: 25/30 (83.3%)
-baseline vs 19/30 (63.3%) for the first candidate (a real regression) and
-24/30 (80.0%, statistically a wash) for the second. Left both constants
-unchanged. One genuinely useful, robust finding did survive the noise,
-though: every trial with `FEED_MAX_PRICE_FRAC` below ~1.4 scored
-win_rate=0.00 with a catastrophic margin (down to -$91,579) -- a feed cap
-that tight can't clear the price often enough to actually feed animals,
-losing them outright. `FEED_MAX_PRICE_FRAC`'s current 5.0 has plenty of
-headroom above that failure zone, so no change needed there either, but
-it's worth remembering as a hard floor if this constant is ever revisited.
-
-**Market-order-slot starvation, found but the fix measured worse --
-reverted**: a downloaded `main.py` vs `reference/x492_nah_i_d_win.py`
-replay (seed 42) showed planted-crop tiles peaking at 36/75 on day 11,
-then declining *monotonically* to 2/75 by day 29 -- decoupled from money,
-which was simultaneously climbing fast ($7k on day 20 to $24.6k on day
-27). Land sat mostly barren despite ample idle cash. Diagnosed cause:
-`agent()` builds its market list as sell -> land -> hire -> feed -> seed
--> fertilizer -> animal, then truncates to `maxMarketOrdersPerTurn` (10,
-silently drops the rest -- see data/README.md). `_build_feed_orders` used
-to append one `["BUY_PRODUCT", "WHEAT", 1]` order per unit needed (up to
-`FEED_RESERVE_PER_ANIMAL * live_animals`, 20+ some turns) instead of a
-single order with quantity N -- across the whole 720-turn replay, 46.2%
-of turns had 8-9 duplicate feed orders alone, and only 6.4% of turns had
-*any* `BUY_SEED` order at all. `_build_seed_orders` had the same
-one-order-per-unit pattern (up to 13 orders across 5 crops). Tried
-consolidating both (plus `_build_fertilizer_orders`, for consistency)
-into one order per resource/crop requesting the full needed quantity --
-data/README.md confirms a single N-quantity order is already processed
-"one-unit-at-a-time" internally for price-impact purposes and stops early
-if money runs out mid-order, so this looked like a pure slot-count win
-with no effect on affordability or price impact. **It measured as a real
-regression anyway**: a same-process 30-seed A/B (git HEAD vs. this fix
-alone, the trusted methodology per the eval-noise note above) against
-`reference/main_fertilizer_selling_submitted_20260817.py` (the pool's
-toughest, most competitive matchup) dropped from 27/30 (90%) to 21/30
-(70%) wins despite similar mean money ($49.6k -> $50.6k) -- more losses
-in exactly the close races where marginal efficiency decides the outcome,
-the same signature as the reverted WHEAT-reserve and animal-token-gating
-fixes elsewhere in this file. Mechanism not confirmed, but a plausible
-one: consolidating into fewer, larger orders changes which of the *other*
-player's own same-turn orders each of mine gets paired against in the
-slot-by-slot simultaneous processing (see data/README.md's Market Action
-section), which can shift realized transaction prices in ways a
-per-order affordability check alone doesn't capture. An isolated 20-seed
-subprocess run of this fix alone looked far worse still (4/20 against the
-same opponent) before the Planting priority under the gate fix below was
-layered on top and recovered most of the money (though not the win rate)
--- a reminder that a single subprocess `pool_winrate.py` run can be
-misleadingly noisy in either direction, per the eval-noise note above;
-the same-process 30-seed number is the one to trust. Reverted
-`_build_feed_orders`/`_build_seed_orders`/`_build_fertilizer_orders` back
-to their one-order-per-unit form.
-
-**Second attempt at the same bug, also reverted**: instead of consolidating
-into one big order, capped `_build_feed_orders`'s per-unit loop at
-`FEED_ORDERS_PER_TURN_CAP = 3` orders/turn -- same one-unit-per-order
-shape as before (so it couldn't be the earlier fix's slot-pairing-with-
-the-opponent mechanism), just fewer of them, still topping the reserve up
-over a few turns since `needed` is recomputed fresh each turn from
-current shed stock. Confirmed this genuinely fixes the *symptom*: a real
-replay that used to crash to 0/5 seed types in stock by day 15 and stay
-there for the rest of the game (0 `BUY_SEED` orders sampled from day 13
-to day 29) instead kept 2-3 of every seed type in stock the whole game,
-`_build_feed_orders` itself capped at exactly 3 orders as designed.
-**Measured worse anyway**: same-process 30-seed A/B (git HEAD = the
-Planting-priority-under-the-gate fix alone, no feed-cap) against
-`reference/main_fertilizer_selling_submitted_20260817.py` -- win rate
-30/30 -> 29/30 (near noise-level, one flipped close game) but mean money
-$61.7k -> $52.9k, a real ~14% drop; against x492, mean money also down
-slightly ($27.8k -> $27.1k), still 0/30 either way. Reverted. **Three
-independent measurements now (full consolidation, this per-turn cap, and
-the earlier reverted sell-side WHEAT reserve) all show the same signature
-against this one specific opponent** -- and that opponent is itself a
-frozen snapshot of an earlier main.py (see `scripts/pool_winrate.py`'s
-DEFAULT_POOL), i.e. a near-mirror match. Leading hypothesis, still
-unconfirmed: something about *this* matchup specifically -- both sides
-running near-identical WHEAT buy/feed/sell logic -- makes any change to
-how aggressively we compete for WHEAT market slots costly in a way that
-doesn't show up against structurally different opponents (x492, the pool
-bots). Worth checking directly before a fourth attempt: does the same fix
-measure differently against a *non-mirror* strong opponent (a real
-downloaded ladder replay's tape, `scripts/extract_replay_tape.py`,
-instead of another main.py snapshot)? The underlying starvation is still
-real and still unaddressed either way.
-
-**Planting priority under the gate**: the same seed-42 replay that caught
-the slot-starvation bug above also showed *why* freeing market slots
-alone didn't fix utilization -- seeds sat available in inventory near
-their `SEED_RESERVE` targets while planted-tile count kept falling, and a
-turn-by-turn dump of every unit's action showed roughly half of all
-farmer/hand turns were pure movement (`NORTH`/`SOUTH`/`EAST`/`WEST`, no
-work done) across days 15-25. The real cause: `_find_target`'s candidate
-sort key is `(priority, distance)` -- priority strictly dominates, so
-distance never matters until every candidate at a better priority is
-either claimed or absent. A fresh PLANT candidate sat at priority 4, the
-*worst* of every candidate type except nothing -- worse than routine
-watering (1), weeding (2), and fertilizer care (3). A single sampled turn
-had 31 higher-priority candidates outstanding (mostly routine watering)
-for only 12 units -- with owned land generating that much routine
-maintenance most turns, PLANT was essentially never reached regardless of
-how many empty tiles sat right next to an idle-looking unit, capping
-utilization at whatever crop count generates just enough maintenance to
-fully occupy the crew (matching the ~48-56% achievable-utilization
-ceiling documented in the Land utilization gate notes above -- this is
-likely *why* that ceiling exists). Added `PLANT_PRIORITY_UNDER_GATE`
-(1.5): while `_land_utilization(farm)` (the same helper `_build_land_
-orders` gates on) is below `LAND_UTILIZATION_GATE`, a fresh PLANT
-candidate sorts at 1.5 instead of 4 -- still behind harvest (0) and
-at-risk watering (0.5), so a dying crop is never sacrificed for a new
-planting, but now it competes with routine watering and beats weeding and
-fertilizer care instead of always losing to them. Measured in isolation
-(same-process 30-seed A/B, git HEAD vs. this change alone, no order-
-consolidation): a clean win against `reference/main_fertilizer_
-selling_submitted_20260817.py`, 30/30 (100%, up from 28/30) with mean
-money up 24% ($49.6k -> $61.7k), and a small, likely-noise-level cost
-against x492 (mean money down 5.7%, still 0/30 either way -- x492 is
-unwinnable at this agent's current strength regardless). Kept.
-
-**Price-reactive fertilizer buying, kept but only partially validated**:
-analyzing 22 downloaded real ladder replays of the shipped submission
-found FERTILIZER price swinging far more than anything in the local pool
-exercises -- one animal-heavy real opponent (team "kiro", `reference/
-tape_kiro.py`) never bought a second quadrant but converted 92% of its
-starting land to PASTURE/COOP and dumped the resulting fertilizer
-byproduct it had no crops left to use, crashing the price from $100 to
-$11 over the game and still beating this agent $49k to $34k off a
-fraction of the land. `_build_fertilizer_orders` used to buy a flat,
-price-blind `FERTILIZER_RESERVE = 2` regardless of how cheap or expensive
-fertilizer was. Added a second, larger `FERTILIZER_STOCKPILE_RESERVE`
-(10) that only kicks in when price is cheap (`<=
-FERTILIZER_CHEAP_PRICE_FRAC * base`, 0.35 -- deliberately well below
-`SELL_PARAMS["FERTILIZER"]`'s own 0.50 sell threshold so this can never
-buy back at a price it would also sell at, the exact WHEAT sell/rebuy
-mistake above) **and** `want_fertilizer` (`_any_fertilizable(farm, day)`,
-the same signal fertilizer delivery already gates on) is true -- gating
-on demand was a direct response to being asked "shouldn't this only buy
-what will actually get used soon?": WHEAT/CARROT/TOMATO/STRAWBERRY
-together are most of `CROP_TARGET_SHARE`, so fertilizable land is close
-to a standing feature of this agent's own mix most of the game, but
-gating costs nothing and avoids stockpiling with nowhere to deliver it
-right after a land purchase, before the crop planner has filled the new
-tiles.
-
-**Validation is incomplete, and that's worth being honest about**: a
-same-process 30-seed A/B against the local pool's toughest opponent and
-x492 came back byte-identical between with-and-without this fix (down to
-the last dollar) -- FERTILIZER price never got anywhere near the 0.35
-cutoff in either matchup, so the new code path never fired at all; it was
-a null test, not a passing one. Tried reproducing the real kiro game
-locally via its extracted tape (`reference/tape_kiro.py`) instead, but
-hit `extract_replay_tape.py`'s own documented divergence caveat hard:
-once this agent's actions differ from the original recorded game (turn
-one), kiro's tape stops interacting with a matching reality and its
-economy collapses to near-nothing (final money $149 vs the original
-$49k) -- fertilizer never even got cheap in that run either. No local
-opponent currently reproduces the animal-dumping pattern that motivated
-this fix. Kept anyway because the change is small, unit-tested, gated
-behind both a demand check and a price band with no overlap with the
-sell threshold, and provably a no-op (not a regression) in every locally
-measured matchup so far -- but treat it as an untested opportunistic
-improvement, not a validated win, until either a real opponent's replay
-becomes available as a fuller (non-diverging) test vehicle or it shows up
-doing something in a future submission's downloaded replays.
-
-**Update: found the real (non-diverging) test vehicle, and it exposed why
-this fix can't fire in the exact scenario that motivated it.**
-`scripts/extract_replay_tape.py` had a real off-by-one bug (see its own
-docstring and git history) making every extracted tape replay one turn
-late for the whole game; fixed, and `reference/tape_kiro.py` now
-reproduces kiro's real actions exactly (720/720 identical) instead of
-collapsing to near-nothing. Re-running this agent against the corrected
-tape at its recorded seed: FERTILIZER does drop into this fix's cheap
-range (down to $28 by day 29, close to the original game's $11), but the
-stockpile order **still never appears** -- `_build_feed_orders` was
-already filling 9 of the 10 `maxMarketOrdersPerTurn` slots with
-individual WHEAT orders (1 SELL + 9 BUY_PRODUCT WHEAT), so the fertilizer
-order built later in `agent()`'s market list gets silently truncated away
-every single turn, confirmed directly in the replay's own `action.market`
-lists. The market-order-slot-starvation bug (see that note above) isn't
-just costing seed purchases -- it's also the reason this fertilizer fix
-is presently dead code in precisely the situation it was built for. Now
-that a non-mirror opponent tape exists locally, the next attempt at
-slot-starvation should be tested against `reference/tape_kiro.py` in
-addition to the mirror-match pool opponent -- **done, see the 4th-attempt
-note below: the mirror-match-specific hypothesis was wrong.**
-
-**Animal land share raised, tried and reverted**: 22 downloaded real
-ladder replays (this session's investigation with `scripts/
-analyze_replay.py`) found a strong correlation -- opponents ending the
-game with >=20% of
-their land in animals beat this agent 75% of the time, vs. a 36% loss
-rate under 20%. Investigating one extreme case (team "kiro", `reference/
-tape_kiro.py`, 92% animal land share off a single quadrant) suggested why:
-animals don't suffer the crop-collapse problem documented throughout this
-file (no seed-buying, no watering, no market-slot competition for seeds --
-just feed/collect/care), so shifting more weight there looked like a way
-to sidestep a problem that's resisted several direct fixes. Raised
-`ANIMAL_LAND_SHARE` 0.18 -> 0.25 and `ANIMAL_MAX_PER_UNIT` 1.0 -> 1.5
-together (`_animal_target` takes the smaller of the two, so raising
-either alone while the other stays at its old value is a no-op once the
-unraised one is what's actually binding -- confirmed true at 0.18/1.0
-starting around 3 quadrants). **Measured worse**: same-process 30-seed
-A/B (git HEAD vs. this change alone) against `reference/main_fertilizer_
-selling_submitted_20260817.py` dropped win rate 30/30 (100%) -> 28/30
-(93%) with mean money down ~7% ($61.7k -> $57.1k); against x492, mean
-money down ~15% ($27.8k -> $23.6k), still 0/30 either way. A single-seed
-check against the newly-fixed `reference/tape_kiro.py` (the actual replay
-that motivated this) went the other way -- both sides' money rose, ours
-by slightly more -- but n=1 there (tapes are only valid at their recorded
-seed) isn't enough to outweigh a properly-powered 30-seed result showing
-the opposite; see the eval-noise note above for why a single seed's
-result gets distrusted by default in this project. Reverted back to
-0.18/1.0. The correlation in the real replay data is still real and
-still unexplained -- it just isn't as simple as "we should run more
-animals ourselves." Leading open question: maybe it's not animal *count*
-that matters but something about how those specific real opponents
-converted a large flock into money more efficiently than this agent's own
-feed/sell logic does (worth checking FEED/SELL timing and price
-discipline in a real animal-heavy opponent's replay before touching this
-constant again).
-
-**Market-order-slot starvation, 4th attempt: the mirror-match hypothesis
-was wrong.** Redid the 1st attempt's fix exactly (consolidate `_build_
-feed_orders`/`_build_seed_orders`/`_build_fertilizer_orders` into one
-N-quantity order per resource/crop instead of one order per unit), this
-time testing the *full* panel: the mirror-match pool opponent, x492, and
--- new, now that the tape off-by-one is fixed -- `reference/tape_kiro.py`
-at its recorded seed. Same-process 30-seed A/B against the pool's
-toughest opponent: 30/30 (100%) -> 21/30 (70%), mean money -18%
-($61.6k -> $50.5k) -- reproduces the 1st attempt's result almost exactly.
-Against x492: mean money -7%. **Against tape_kiro -- the actual
-non-mirror opponent the last three notes all asked for -- the same fix
-regressed even harder**: $38.5k -> $25.0k, a 35% drop, going from a
-narrow win to a clear loss, with kiro's own money *rising* slightly
-despite kiro's actions being byte-identical either way (only the shared
-market prices differ). **This conclusively rules out the mirror-match-
-specific mechanism** every prior note in this section proposed -- a
-structurally different, non-reactive opponent regressed worse than the
-mirror did, so whatever's wrong here doesn't depend on facing an
-opponent that shares this agent's own logic at all.
-
-Revised mechanism, and it's simpler: both the old and new code estimate
-affordability with the same *static* per-unit price (neither accounts
-for the fact that buying more units within one turn should walk the
-quoted price up, since the engine does that internally but this agent's
-own budgeting never re-quotes mid-loop). Under the old one-order-per-unit
-scheme, that inaccuracy was accidentally bounded -- at most ~5-9 orders
-ever fit before `maxMarketOrdersPerTurn` (10) or an earlier category
-(sell/land/hire) ate the rest, so a turn could never spend on more than
-that many *quoted-price* units of WHEAT regardless of how large `needed`
-actually was. Consolidating into a single order removes that accidental
-cap: a turn with a large accumulated `needed` (a big flock, several
-WHEAT-starved turns in a row) now requests the *entire* amount in one
-order and, if `money` clears only the same static per-unit check, the
-engine still walks the real internal price up through all of it -- likely
-spending far more in one turn, at a far worse average price, than the
-old scheme's slot-limited version ever could. This fits every data point:
-opponent-independent (matches all three panels), worse with a bigger
-flock (kiro's tape has more animals than the pool opponents), and
-consistent in direction across all 4 attempts on this bug. Reverted (again)
-to the one-order-per-unit form. **Not worth a 5th blind attempt** without
-addressing this specific mechanism -- a real fix would need to cap the
-*quantity* requested per order (e.g. `min(needed, some_cap)`), not just
-consolidate slots or cap order *count*, so a turn's WHEAT spend stays
-bounded the way the old accidental slot-limit bounded it, while still
-using only 1-2 slots instead of ~8.
-
-**5th attempt: exactly that idea, tried, still worse.** Also consolidated
-`_build_seed_orders` fully (safe -- seed cost is a fixed table value, not
-a dynamic price, so the WHEAT mechanism above can't apply there) and
-`_build_fertilizer_orders` fully (safe in practice -- its own reserve
-targets already hard-cap `needed` far below WHEAT's animal-count-scaled
-deficit). For `_build_feed_orders`, added `FEED_ORDER_QUANTITY_CAP = 8`:
-one order requesting `min(needed, 8)` -- restoring, on purpose, roughly
-the same per-turn quantity ceiling the old one-order-per-unit form got by
-accident from `maxMarketOrdersPerTurn`, but in 1 slot instead of ~8.
-Measured against the same panel: mirror-match pool opponent improved
-somewhat over the 4th attempt (30/30 -> 27/30, -11% money, vs. attempt
-4's 30/30 -> 21/30, -18%) but still a real regression, not a wash. x492:
--17% money, similar to before. **Against `tape_kiro`, the one opponent
-that matters most here, it got *worse* than the 4th attempt**: $38.5k ->
-$22.8k (-41%, vs. attempt 4's -35%), the narrow win flipping to an even
-larger loss. So capping the *quantity* at a fixed guess (8) didn't
-recover what full consolidation lost, and did measurably worse on the
-one non-mirror opponent this whole investigation was trying to serve.
-Reverted a 5th time. The "static price doesn't scale with quantity"
-mechanism from the 4th-attempt note is evidently not the whole
-explanation either, or `FEED_ORDER_QUANTITY_CAP=8` was simply the wrong
-number -- unclear which without more instrumentation than a same-process
-A/B provides (e.g. tracking actual realized WHEAT purchase prices turn by
-turn, old vs. new, in the same replay). **Five attempts across two
-sessions have now failed to improve on the original one-order-per-unit
-form** (sell-side WHEAT reserve, full consolidation x2, order-count cap,
-quantity cap) -- treat this as a settled "don't touch `_build_feed_
-orders`'s order-count/quantity shape without new evidence" for now,
-rather than a queue of ideas still worth blind-testing. The underlying
-slot-starvation symptom (confirmed real, confirmed blocking both seed
-purchases and the fertilizer fix) remains unaddressed.
-
-**Seed reserve doubled, tried and reverted -- catastrophically.** With
-utilization confirmed as the reason the 4th quadrant never stays
-unlocked (see the Land utilization gate notes above), and `_build_feed_
-orders` off the table per the five attempts above, doubled `SEED_RESERVE`
-(3/3/3/2/2 -> 6/6/6/4/4) on the theory that `_build_seed_orders`'s own
-order only wins a market slot a minority of turns (crowded out by feed,
-same starvation bug), so a bigger buffer on the rare turn it *does* land
-would give more planting runway before running dry -- and seed cost is a
-fixed table value, not a dynamic price, so none of the WHEAT-consolidation
-mechanisms above should apply. **Measured far worse than any other change
-this session**: same-process 30-seed A/B against the pool's toughest
-opponent, 30/30 (100%) -> 5/30 (17%), mean money -49% ($61.6k -> $31.2k);
-against x492, mean money -56% ($27.8k -> $12.2k). Investigated why with a
-seed-1 replay: crop counts and utilization were genuinely *better* than
-this agent has shown almost anywhere else this session (peak 38, still 27
-by day 26) -- the buffer-depth theory was directionally right. But money
-stayed pinned near `SAFETY_RESERVE` for the first ~19 days despite that
-healthy crop count, and the reason turned out to be the WHEAT sell/rebuy
-round trip (see that note above, and _build_feed_orders's docstring) --
-already known, already measured as a real but "bounded, acceptable" cost
-at the old WHEAT throughput. Doubling WHEAT's own reserve target
-(alongside the others) pushed enough more WHEAT through the crop cycle
-that the round trip's *volume* exploded: 124 of 480 sampled turns showed
-a same-turn `SELL WHEAT` followed by multiple `BUY_PRODUCT WHEAT` orders
-(753 sold vs. 473 bought back over 20 days) -- a cost that scales with
-WHEAT throughput and was fine at the old volume, catastrophic at the new
-one. Reverted to 3/3/3/2/2.
-
-**Price-reactive seed reserve, kept.** Rather than the narrower
-"non-WHEAT only" idea above, scaled each crop's own `SEED_RESERVE`
-target by how far its *current* price sits above its own base
-(`SEED_RESERVE_PRICE_CAP = 2.0`, never scaling down below baseline for a
-depressed price) -- mirrors `_CropPlanner`'s own price-attractiveness
-logic, just applied to how much to buy ahead of need instead of what to
-plant right now. The idea: WHEAT structurally has little room to trade
-far above its own base for long (its price table entry shows scarcity
-capped fairly close to base compared to the premium crops), so a
-price-scaled reserve leaves WHEAT's target close to baseline on its own,
-without a special case, while MELON/STRAWBERRY -- which do trade well
-above base when genuinely worth growing -- earn real room to stock up.
-Measured with the full panel: same-process 30-seed A/B against the
-pool's toughest opponent and x492 came back within noise of the
-unmodified baseline in both money and win rate (30/30 either way,
-well under 1% money difference) -- notably *not* the WHEAT-round-trip
-blowup the flat-doubling attempt caused, even though a spot-check replay
-showed WHEAT's own round-trip volume was, if anything, higher in raw
-terms (1998 sold / 1656 bought back vs. the flat-doubling replay's 753/
-473) -- so the earlier theory ("more WHEAT volume through the round trip
-is what makes it costly") isn't the full picture either; something about
-scaling every crop's reserve *uniformly* specifically, rather than
-price-scaling, was the more direct cause of that regression, still not
-fully pinned down. Against `reference/tape_kiro.py` (the real non-mirror
-opponent), a clean, uncontested win: $38.5k -> $48.7k (+27%), margin
-over kiro widening from $343 to $8,447 -- the best result this agent has
-shown against that opponent all session. Kept. Land utilization /
-4th-quadrant unlocking still weren't achieved in that same replay (still
-capped at 3 quadrants, still ~88% crop collapse by game end) -- the
-`SEED_RESERVE` bottleneck this was meant to test turned out not to be
-what's actually gating the 4th quadrant, but the change is a genuine,
-validated money win in its own right regardless.
-
-**Crop mix shifted toward ongoing crops, tried and reverted --
-catastrophically.** Two independent real top-ladder replays (team "Nihal
-l.suvarna", and #2-ladder "tetsuya" vs "ykhnkf") both leaned heavily on
-STRAWBERRY and sustained near-total land utilization for 15+ days with
-essentially zero collapse, unlike this agent's own replays. The
-mechanism looked clear: STRAWBERRY is "ongoing" (`CROPS["STRAWBERRY"]`:
-`first_yield_day=10, interval=2, max_yield=4`, producing through
-day+16) -- a tile planted once needs no further `BUY_SEED` for most of a
-30-day season, sidestepping the market-order-slot-starvation bug
-entirely instead of trying to fix it directly (five attempts at that,
-all reverted, see that note above). Shifted `CROP_TARGET_SHARE` from
-{MELON .45, WHEAT .25, CARROT .15, TOMATO .10, STRAWBERRY .05} to
-{MELON .20, WHEAT .15, CARROT .10, TOMATO .15, STRAWBERRY .40}, and
-rebalanced `SEED_RESERVE` to match (STRAWBERRY first in iteration order
-and given the largest baseline, since it's also the single most
-expensive seed at $100 and would otherwise never win the turn's
-affordable budget against four cheaper crops ahead of it -- WHEAT's own
-reserve deliberately left untouched at 3, per the lesson in the Seed
-reserve doubled note above). **Measured as the single worst regression
-of the entire session**: same-process 30-seed A/B against the pool's
-toughest opponent, 30/30 (100%) -> 1/30 (3%), mean money -59%; against
-x492, mean money -75%. Investigated why, expecting the same WHEAT-
-round-trip-style mechanism or a STRAWBERRY price crash (its
-above-target curve is punishing, `above_target=1.60`) -- found neither:
-a spot-check replay showed STRAWBERRY price *rising* the whole game
-($190 -> $244, well above its $120 base, zero signs of an oversupply
-crash) but only 78 units sold across the entire 720-turn game despite
-peak STRAWBERRY tile counts above 30 -- a real *throughput* problem, not
-a price problem. This agent's harvest/carry/sell pipeline (one HARVEST
-action per unit per turn, same priority-0 treatment for every crop type)
-apparently cannot extract value from a STRAWBERRY-heavy mix anywhere
-near as efficiently as the real players this idea was copied from --
-they evidently do something with hand allocation or harvest cadence this
-agent doesn't, that lets a large STRAWBERRY holding actually convert to
-sales. Reverted both `CROP_TARGET_SHARE` and `SEED_RESERVE` to their
-prior values. **The underlying insight (ongoing crops sidestep the
-seed-starvation bug) is very likely still correct** -- it's this agent's
-execution that isn't equipped to capitalize on it, not the crop choice
-itself. Worth revisiting only after understanding *why* STRAWBERRY
-throughput is so low here specifically (compare HARVEST-op frequency and
-shed-arrival rate per STRAWBERRY tile against WHEAT/MELON's own, in a
-replay, before touching these constants again) -- not by just re-trying
-a bigger STRAWBERRY share blind.
-
-**Found the throughput mechanism, tried the direct fix, still reverted.**
-Tracked one STRAWBERRY tile's full state across its lifetime in the
-replay above: it harvested correctly all 4 scheduled times (`max_yield`),
-`yield_units` cycling 0->1(or 2)->0 right on schedule -- harvesting
-itself isn't broken. The gap is downstream: `private.inventories` at the
-same timestamps showed 9-10 units of STRAWBERRY sitting in *carried*
-inventory across several units simultaneously, not in the shed. Cause:
-`_find_target`'s `shed_priority` for walking carried produce home was a
-flat 5 -- the *worst* tier, below even routine watering (1) and weeding
-(2). With a dense, continuously-cycling crop like STRAWBERRY generating
-a steady stream of priority-0 harvest candidates, a unit already
-carrying produce never won the race to walk home; it kept getting
-redirected to the next harvest instead, chaining indefinitely. Added
-`SHED_RETURN_PRIORITY = 2` (replacing the hardcoded 5), so a carrying
-unit still yields to anything genuinely urgent (harvest 0, at-risk water
-0.5, routine water 1) but now competes with weeding instead of always
-losing to it. **Measured as a real regression across the full panel**:
-mirror-match pool opponent 30/30 -> 28/30 wins, mean money -13%; x492
-mean money -10%; against `reference/tape_kiro.py`, a clean win flipped
-to a clear loss ($38.5k -> $32.1k while kiro's own money rose 44% to
-$54.8k). Reverted to the flat 5. Plausible mechanism: raising shed-return
-to compete with weeding evidently trades one problem for another --
-weeds now win ties against a returning unit less often, but the same
-unit also now abandons *weeding itself* and boosted-priority planting
-(1.5, see the Planting priority under the gate note) more readily to
-cash out, undoing more value than the recovered carried-produce fixed.
-The underlying diagnosis (produce piling up in carry under a
-continuously-cycling crop) is solid and directly confirmed in a replay
--- the fix just needs to be more targeted than a blanket priority bump
-(e.g. only escalate shed-return priority once a unit is carrying above
-some threshold quantity, rather than unconditionally) before trying
-again.
+stalled) attempt at a learned policy. See this project's session memory for
+the current list of open next-steps (pasture-placement drift, idle/wandering
+hands, harvest-ready plants converting to weeds, planting stopping early
+around day ~25, WHEAT unliquidated at game end, an opening-book idea for the
+first days).
 """
 
 from __future__ import annotations
@@ -1133,33 +273,44 @@ FERTILIZE_CROPS = {"WHEAT", "CARROT", "TOMATO", "STRAWBERRY"}
 PRICE_ATTRACTIVENESS_WEIGHT = 0.1  # how much a crop's current price (as a ratio of its
                                     # base) pulls _CropPlanner.choose() toward it, on top
                                     # of the target-mix-share gap -- see the module
-                                    # docstring's Price-attractiveness-aware planting note
+                                    # docstring's Price-aware planting note
 
 PLANT_PRIORITY = 4  # _find_target's base priority for planting an empty tile -- see
-                     # the module docstring's Planting priority under the gate note
+                     # the module docstring's Land / hands note
 PLANT_PRIORITY_UNDER_GATE = 1.5  # used instead of PLANT_PRIORITY while owned land is
                                   # under LAND_UTILIZATION_GATE -- still below harvest (0)
                                   # and at-risk water (0.5) so a dying crop is never
                                   # sacrificed for a new planting, but now competes with
                                   # routine water (1) and beats weeding (2) and fertilizer
                                   # care (3), instead of always losing to them
+SHED_RETURN_URGENT_PRIORITY = 2  # _find_target's priority for walking carried produce home
+                                  # once carrying at least CARRIED_PRODUCE_URGENT_THRESHOLD
+                                  # units -- see the module docstring's Shed-return priority
+                                  # note. An earlier unconditional
+                                  # version of this (every carrying unit, not just a real
+                                  # backlog) regressed; escalating only once a real backlog has
+                                  # piled up should let a unit carrying just 1-2 units finish a
+                                  # nearby routine chore first (the case that already worked
+                                  # fine) while still capping how much value piles up in carry
+CARRIED_PRODUCE_URGENT_THRESHOLD = 3  # see SHED_RETURN_URGENT_PRIORITY
 
 SEED_RESERVE = {"MELON": 3, "WHEAT": 3, "CARROT": 3, "TOMATO": 2, "STRAWBERRY": 2}  # baseline,
-    # used as-is while a crop's price isn't currently attractive -- see _build_seed_orders's
-    # Price-reactive seed reserve note
+    # used as-is while a crop's price isn't currently attractive -- see the module
+    # docstring's Seed reserve note
 SEED_RESERVE_PRICE_CAP = 2.0  # max multiplier on SEED_RESERVE when a crop's current price is
     # attractively above its own base -- see _build_seed_orders. Doubling SEED_RESERVE flatly
     # for every crop was tried and reverted (catastrophic: it blew up the WHEAT sell/rebuy
-    # round trip by volume, see that module docstring note); scaling by price instead means
+    # round trip by volume, see the module docstring's WHEAT sell/rebuy round trip note);
+    # scaling by price instead means
     # WHEAT -- whose price rarely swings far above base -- stays close to its own baseline
     # reserve, while a crop that's actually worth growing more of (MELON/STRAWBERRY trading
     # well above base) gets more room to stock up
 FERTILIZER_RESERVE = 2
-FERTILIZER_STOCKPILE_RESERVE = 10  # reserve target while price is cheap -- see
-                                    # _build_fertilizer_orders's Price-reactive note
+FERTILIZER_STOCKPILE_RESERVE = 10  # reserve target while price is cheap -- see the module
+                                    # docstring's Price-reactive fertilizer buying note
 FERTILIZER_CHEAP_PRICE_FRAC = 0.35  # price <= this fraction of base triggers stockpiling.
                                      # Deliberately well below SELL_PARAMS["FERTILIZER"]'s own
-                                     # 0.50 sell threshold -- see _build_fertilizer_orders
+                                     # 0.50 sell threshold -- see the same docstring note
 FERTILIZER_MAX_PRICE_FRAC = 1.2  # don't buy fertilizer more than 20% over base
 
 SELL_PARAMS = {
@@ -1193,18 +344,16 @@ ANIMAL_TARGET_SHARE = {"COW": 0.60, "SHEEP": 0.40, "GOOSE": 0.0}  # GOOSE has th
     # lowest $/day of the three ($50: EGG base 50 / 1-day interval, vs COW's $80 and
     # SHEEP's $66.7) despite being the cheapest to buy -- 5/5 downloaded top-ladder
     # replays (3 different players) never place one; see the module docstring's
-    # Animal husbandry (attempt 3) note
+    # Animals note
 ANIMAL_LAND_SHARE = 0.18  # target fraction of owned tiles reserved for animal
-                          # structures -- see the module docstring's Animal husbandry
-                          # (attempt 3) note; top-ladder replays hold this steady
-                          # around 15-24% throughout the season. Tried raising to 0.25
-                          # (see the Animal land share raised, tried and reverted note)
-                          # and it measured worse -- back to 0.18.
+                          # structures -- see the module docstring's Animals note;
+                          # top-ladder replays hold this steady around 15-24% throughout
+                          # the season. Raising to 0.25 measured worse -- back to 0.18.
 ANIMAL_MAX_PER_UNIT = 1.0  # hard cap on live animals, per farmer/hand currently hired --
-                            # see the module docstring's Animal capacity vs crop capacity
-                            # note. ANIMAL_LAND_SHARE alone grows with quadrants bought
-                            # regardless of crew size, letting the animal count outgrow
-                            # what the same crew can also water/harvest/weed for
+                            # see the module docstring's Animals note. ANIMAL_LAND_SHARE
+                            # alone grows with quadrants bought regardless of crew size,
+                            # letting the animal count outgrow what the same crew can
+                            # also water/harvest/weed for
 ANIMAL_RESERVE = 1  # spare bought-but-not-yet-placed animal tokens to keep queued, per kind --
                     # known to let tokens strand with no empty structure to receive them in
                     # some games; see _build_animal_orders's own "Known bug" note
@@ -1212,12 +361,13 @@ FEED_RESERVE_PER_ANIMAL = 2  # days of WHEAT buffer per live animal, bought dire
                               # the market -- see _build_feed_orders for why
 FEED_MAX_PRICE_FRAC = 5.0  # a near-nonbinding backstop, not a real cap: missing a feed
                             # loses the whole animal ($300-500+), dwarfing even a wildly
-                            # inflated wheat price -- see the module docstring's Animal
-                            # husbandry (attempt 2) note for why a tighter cap is a trap
+                            # inflated wheat price -- see the module docstring's WHEAT
+                            # sell/rebuy round trip note for why a tighter cap is a trap
+                            # (below ~1.4x base, animals starve outright in testing)
 
 HANDS_BASE = 2  # hands hired even at the starting NW quadrant alone
 HANDS_PER_QUADRANT = 3
-MAX_HANDS = 12  # was 6, briefly 8; see the module docstring's Real-hiring-pace note --
+MAX_HANDS = 12  # was 6, briefly 8; see the module docstring's Land / hands note --
                 # a real top-ladder replay showed 5 hands on day 0 with 1 quadrant and
                 # 10-12 sustained for the rest of the season, nothing like the old
                 # `2 * quadrants` formula's pace. HANDS_BASE/HANDS_PER_QUADRANT/
@@ -1233,7 +383,7 @@ SEED_BUFFER_DAYS = 1  # a crop needs first_yield_day + this many days left to be
 LAND_CUTOFF_DAYS = 5  # stop buying new land this close to the end, it won't pay back in time
 LAND_UTILIZATION_GATE = 0.50  # don't buy the next quadrant until this much of what we
                                # already own is planted -- see the module docstring's
-                               # Land utilization gate note. Still below the ~48-56%
+                               # Land / hands note. Still below the ~48-56%
                                # achievable-utilization ceiling observed in real replays
                                # (0.6 deadlocked against it), just less borderline than 0.45
 ENDGAME_LIQUIDATION_DAYS = 2  # ignore the sell-price threshold this close to the end
@@ -1300,7 +450,7 @@ def _animal_zone(farm, board_size, needed):
     claim this zone first, leaving the rest of the map free for crops to
     spread into, instead of both competing for whichever empty tile happens
     to be nearest the unit that finds it first. See the module docstring's
-    spatial clustering (animals) note: real top-ladder play keeps every
+    Animals note: real top-ladder play keeps every
     animal structure in a tight ring around the shed (FEED is daily and
     unmissable, so a short walk there matters), with crops filling the rest
     of the map edge-to-edge."""
@@ -1408,7 +558,7 @@ class _CropPlanner:
         and one at 2x its base price score identically once both clear the
         gate, so a small-target-share crop at a genuinely great price still
         loses to a big-target-share crop merely above threshold. See the
-        module docstring's Price-attractiveness-aware planting note."""
+        module docstring's Price-aware planting note."""
         gap = self.counts[crop] / self.total - CROP_TARGET_SHARE[crop]
         price = self.prices.get(crop)
         if price is None:
@@ -1466,8 +616,8 @@ def _animal_target(farm):
     also keep up with on the crop side: by day 20-28 (3 quadrants, ~$40k
     game) animal structures reached 14 while the same crew's planted tile
     count collapsed from ~17 to ~2-3 and weeds went uncleared for the rest
-    of the season -- see the module docstring's Animal capacity vs crop
-    capacity note. Shared by _AnimalPlanner and _build_animal_orders so
+    of the season -- see the module docstring's Animals note. Shared by
+    _AnimalPlanner and _build_animal_orders so
     both always agree on the same cap -- though see
     _build_animal_orders's own "Known bug" note: they still track
     *committed* differently (shed tokens vs empty structures), which can
@@ -1483,8 +633,8 @@ def _animal_target(farm):
 class _AnimalPlanner:
     """Tracks, for one turn, which animal kind to build a structure for or
     fetch from the shed next -- mirrors _CropPlanner's price-aware,
-    share-balancing logic. Unlike attempt 2 (see the module docstring's
-    Animal husbandry notes), capacity is sized as a target *fraction of
+    share-balancing logic. Unlike an earlier dedicated-hands design (see
+    the module docstring's Animals note), capacity is sized as a target *fraction of
     owned land* (`ANIMAL_LAND_SHARE`), not a fixed hand allocation, and any
     unit -- farmer or hand -- may act on an animal task; there's no
     animal-only crew. `wants_structure`/`wants_pickup` are read-only (safe
@@ -1544,8 +694,8 @@ class _AnimalPlanner:
         Excludes kinds with a 0 target share (a "structure type has zero
         spares" check alone would otherwise let a 0-share kind win as soon
         as its structure type is the only one with no spare waiting --
-        checked at the module docstring's Animal husbandry (attempt 3) note
-        after that let GOOSE keep getting built despite a 0 target share)."""
+        see the module docstring's Animals note: that gap let GOOSE keep
+        getting built despite a 0 target share)."""
         if self._committed() >= self.target:
             return None
         needing = [
@@ -1587,7 +737,7 @@ def _find_target(
     walking to, across both crops and animals -- one shared crew, one shared
     priority order, so a unit works whichever is more urgent right now
     instead of being permanently assigned to one or the other (see the
-    module docstring's Animal husbandry (attempt 3) note).
+    module docstring's Animals note).
 
     `liquidating` (close to the last day, see the module docstring's Endgame
     liquidation note) swaps water's and shed-return's priority: watering a
@@ -1607,8 +757,8 @@ def _find_target(
 
     `plant_priority` (PLANT_PRIORITY or PLANT_PRIORITY_UNDER_GATE, chosen
     once per turn in `agent()`) is the priority a fresh PLANT candidate
-    sorts at -- see the module docstring's Planting priority under the
-    gate note: priority strictly outranks distance in this function's sort
+    sorts at -- see the module docstring's Land / hands note: priority
+    strictly outranks distance in this function's sort
     key, so at its baseline (4, below every maintenance chore except
     routine water) a single turn with more outstanding water/harvest/weed/
     animal-care work than there are units leaves *zero* units ever reaching
@@ -1620,7 +770,7 @@ def _find_target(
     candidate gets its raw distance inflated by how utilized its quadrant
     already is (`quadrant_util`), nudging new plantings toward whichever
     quadrant is most neglected instead of always the literal nearest empty
-    tile -- see the module docstring's spatial clustering (crops) note. Every
+    tile -- see the module docstring's Land / hands note. Every
     other candidate type keeps plain, unadjusted distance.
     """
     fx, fy = pos
@@ -1674,15 +824,21 @@ def _find_target(
                 elif animal_planner.wants_structure():
                     candidates.append((x, y, 4, dist))  # build a structure (overflow beyond the zone)
 
-    carrying_produce = any(
-        n > 0 and k not in ("WHEAT", *ANIMAL_KINDS) and (k != "FERTILIZER" or not want_fertilizer or liquidating)
-        for k, n in inv.items()
+    carried_produce_total = sum(
+        n for k, n in inv.items()
+        if n > 0 and k not in ("WHEAT", *ANIMAL_KINDS) and (k != "FERTILIZER" or not want_fertilizer or liquidating)
     )
+    carrying_produce = carried_produce_total > 0
     needs_fertilizer = inv.get("FERTILIZER", 0) == 0 and want_fertilizer and not liquidating
     needs_wheat = inv.get("WHEAT", 0) <= 0 and any_unfed and shed_wheat_available
     needs_animal_pickup = animal_planner.wants_pickup() and not any(inv.get(k, 0) > 0 for k in ANIMAL_KINDS)
     if carrying_produce or needs_fertilizer or needs_wheat or needs_animal_pickup:
-        priority = -1 if needs_wheat else shed_priority
+        if needs_wheat:
+            priority = -1
+        elif carried_produce_total >= CARRIED_PRODUCE_URGENT_THRESHOLD:
+            priority = SHED_RETURN_URGENT_PRIORITY
+        else:
+            priority = shed_priority
         for (sx, sy) in shed_tiles:
             if (sx, sy) not in claimed:
                 candidates.append((sx, sy, priority, abs(sx - fx) + abs(sy - fy)))  # return to shed
@@ -1801,14 +957,14 @@ def _build_sell_orders(shed, prices, days_remaining):
     """Dumps the entire shed stock of a crop in one order once its price
     threshold is met -- same behavior as melon_maxxer, deliberately reverted
     from an earlier version that capped units sold per turn (see the module
-    docstring's Correction note). A per-turn cap was tried expecting it to
+    docstring's Selling note). A per-turn cap was tried expecting it to
     avoid crashing the price via a big single-order dump; instead it was a
     measured net negative (a 19/20-seed head-to-head loss to this dump
     version, `reference/main_dump_sell.py`): holding harvested value in the
     shed waiting for the cap to free up slows reinvestment into land/seeds/
     hands more than an occasional price dip costs, at this agent's actual
-    production scale. See the module docstring's Sell/rebuy round-trip note
-    for a second, more targeted attempt at holding back WHEAT specifically
+    production scale. See the module docstring's WHEAT sell/rebuy round trip
+    note for a second, more targeted attempt at holding back WHEAT specifically
     (for animal feed) that hit the same wall for the same underlying reason.
     """
     orders = []
@@ -1832,13 +988,13 @@ def _hands_target(quadrants):
 
 def _land_worth_buying(quadrants_now):
     """The next quadrant only pays for itself if it actually raises hire
-    capacity -- see the module docstring's Land utilization gate note.
+    capacity -- see the module docstring's Land / hands note.
     Originally caught with the old `2 * quadrants` hire formula (capped at
     MAX_HANDS=6): the ceiling fell at exactly 3 quadrants, and a replay
     showed the same 6 hands spread across a 4th quadrant's extra land
     planting no more tiles in absolute terms than 3 quadrants' worth, just
-    diluted thinner. `_hands_target`'s current formula (see the module
-    docstring's Real hiring pace note) was deliberately picked to stay
+    diluted thinner. `_hands_target`'s current formula (see the same
+    docstring note) was deliberately picked to stay
     strictly increasing all the way through 4 quadrants, so this stops
     blocking anything in practice under it -- the mechanism stays in place
     regardless, for whatever the hire formula ends up being."""
@@ -1887,10 +1043,10 @@ def _build_seed_orders(seeds, money, days_remaining, prices):
     `SEED_RESERVE` scaled up by how far its current price sits above its
     own base (capped at `SEED_RESERVE_PRICE_CAP`), never scaled down
     below the baseline for a temporary dip -- mirrors `_CropPlanner`'s own
-    price-attractiveness logic (see the module docstring's Price-
-    attractiveness-aware planting note), just applied to how much to buy
+    price-attractiveness logic (see the module docstring's Price-aware
+    planting note), just applied to how much to buy
     ahead of need instead of what to plant right now. Directly answers
-    the module docstring's Seed reserve doubled note: a flat reserve
+    the module docstring's Seed reserve note: a flat reserve
     increase blew up the WHEAT sell/rebuy round trip because WHEAT's
     reserve grew by the same factor as every other crop's regardless of
     whether WHEAT was actually worth growing more of. Scaling by price
@@ -1935,9 +1091,11 @@ def _build_fertilizer_orders(private, prices, money, want_fertilizer):
     fertilizer on the rare turn none of those crops are actually planted
     (e.g. right after a land purchase, before the crop planner has
     filled the new tiles). The baseline FERTILIZER_RESERVE is left
-    ungated, same as before this fix -- see the module docstring's
-    Selling fertilizer note for why that small a reserve's occasional
-    demand-blind churn was already judged an acceptable, bounded cost.
+    ungated, same as before this fix -- the shed's FERTILIZER count is one
+    fungible pool for both collected (free) and market-bought stock, so
+    this 2-unit reserve can occasionally get swept into a sell dump and
+    get rebought next cycle; a bounded, minor churn cost not worth a
+    separate reserved-vs-sellable split for 2 units.
     FERTILIZER_CHEAP_PRICE_FRAC is set well below
     SELL_PARAMS["FERTILIZER"]["threshold"] (0.50) deliberately: the two
     must never overlap, or this buys back at a price we'd also be
@@ -1966,7 +1124,7 @@ def _build_feed_orders(farm, private, prices, money):
     starve even with plenty of attention: `_build_sell_orders` dumps every
     WHEAT harvest as soon as its price clears the sell threshold, so the
     shed can sit at 0 WHEAT for turns at a stretch -- see the module
-    docstring's Animal husbandry (attempt 2) note. Placed ahead of
+    docstring's WHEAT sell/rebuy round trip note. Placed ahead of
     `_build_seed_orders` in `agent()`'s market list: missing a seed buy
     delays a planting one turn, missing a feed loses the whole animal."""
     live = _live_animal_count(farm)

@@ -398,6 +398,47 @@ def test_crop_planner_excludes_crops_that_cannot_mature_in_time():
     assert planner.choose() in ("WHEAT", "CARROT")
 
 
+def test_find_target_shed_return_stays_routine_below_the_carry_threshold():
+    """Locks the targeted shed-return fix (see the module docstring's
+    Shed-return priority, targeted second attempt note): carrying fewer
+    than CARRIED_PRODUCE_URGENT_THRESHOLD units of produce must still use
+    the routine (low) priority, losing to a routine animal-care chore --
+    an earlier unconditional version of this fix escalated every carrying
+    unit regardless of load and regressed."""
+    board_size = 5
+    tiles = [[None for _ in range(board_size)] for _ in range(board_size)]
+    tiles[0][1] = {"kind": "PASTURE", "animal": "COW", "fed_today": True, "cared_today": False}  # close: dist=1
+    farm = {"tiles": tiles, "hands": []}
+    animal_planner = main._AnimalPlanner(farm, {}, {})
+    small_load = {"STRAWBERRY": main.CARRIED_PRODUCE_URGENT_THRESHOLD - 1}
+    target = main._find_target(
+        pos=[0, 0], farm=farm, day=0, board_size=board_size, claimed=set(), inv=small_load,
+        planner=main._CropPlanner({"seeds": {}}, farm, days_remaining=20),
+        animal_planner=animal_planner, shed_tiles={(4, 4)},  # far: dist=8
+        want_fertilizer=False, shed_wheat_available=False, liquidating=False,
+        animal_zone=set(), quadrant_util=_NEUTRAL_QUADRANT_UTIL, plant_priority=main.PLANT_PRIORITY,
+    )
+    assert (target[0], target[1]) == (1, 0)  # cares for the nearby animal instead of walking home
+
+
+def test_find_target_shed_return_turns_urgent_above_the_carry_threshold():
+    """Same setup, but at the threshold: now walks home instead."""
+    board_size = 5
+    tiles = [[None for _ in range(board_size)] for _ in range(board_size)]
+    tiles[0][1] = {"kind": "PASTURE", "animal": "COW", "fed_today": True, "cared_today": False}
+    farm = {"tiles": tiles, "hands": []}
+    animal_planner = main._AnimalPlanner(farm, {}, {})
+    big_load = {"STRAWBERRY": main.CARRIED_PRODUCE_URGENT_THRESHOLD}
+    target = main._find_target(
+        pos=[0, 0], farm=farm, day=0, board_size=board_size, claimed=set(), inv=big_load,
+        planner=main._CropPlanner({"seeds": {}}, farm, days_remaining=20),
+        animal_planner=animal_planner, shed_tiles={(4, 4)},
+        want_fertilizer=False, shed_wheat_available=False, liquidating=False,
+        animal_zone=set(), quadrant_util=_NEUTRAL_QUADRANT_UTIL, plant_priority=main.PLANT_PRIORITY,
+    )
+    assert (target[0], target[1]) == (4, 4)  # cashes out instead
+
+
 def test_find_target_prioritizes_a_tile_about_to_become_a_weed():
     """See the module docstring's Neglected-tile urgency note: a tile with
     consecutive_unwatered >= 1 is one missed watering from turning into a
