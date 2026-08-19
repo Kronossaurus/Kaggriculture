@@ -1034,6 +1034,50 @@ capped at 3 quadrants, still ~88% crop collapse by game end) -- the
 `SEED_RESERVE` bottleneck this was meant to test turned out not to be
 what's actually gating the 4th quadrant, but the change is a genuine,
 validated money win in its own right regardless.
+
+**Crop mix shifted toward ongoing crops, tried and reverted --
+catastrophically.** Two independent real top-ladder replays (team "Nihal
+l.suvarna", and #2-ladder "tetsuya" vs "ykhnkf") both leaned heavily on
+STRAWBERRY and sustained near-total land utilization for 15+ days with
+essentially zero collapse, unlike this agent's own replays. The
+mechanism looked clear: STRAWBERRY is "ongoing" (`CROPS["STRAWBERRY"]`:
+`first_yield_day=10, interval=2, max_yield=4`, producing through
+day+16) -- a tile planted once needs no further `BUY_SEED` for most of a
+30-day season, sidestepping the market-order-slot-starvation bug
+entirely instead of trying to fix it directly (five attempts at that,
+all reverted, see that note above). Shifted `CROP_TARGET_SHARE` from
+{MELON .45, WHEAT .25, CARROT .15, TOMATO .10, STRAWBERRY .05} to
+{MELON .20, WHEAT .15, CARROT .10, TOMATO .15, STRAWBERRY .40}, and
+rebalanced `SEED_RESERVE` to match (STRAWBERRY first in iteration order
+and given the largest baseline, since it's also the single most
+expensive seed at $100 and would otherwise never win the turn's
+affordable budget against four cheaper crops ahead of it -- WHEAT's own
+reserve deliberately left untouched at 3, per the lesson in the Seed
+reserve doubled note above). **Measured as the single worst regression
+of the entire session**: same-process 30-seed A/B against the pool's
+toughest opponent, 30/30 (100%) -> 1/30 (3%), mean money -59%; against
+x492, mean money -75%. Investigated why, expecting the same WHEAT-
+round-trip-style mechanism or a STRAWBERRY price crash (its
+above-target curve is punishing, `above_target=1.60`) -- found neither:
+a spot-check replay showed STRAWBERRY price *rising* the whole game
+($190 -> $244, well above its $120 base, zero signs of an oversupply
+crash) but only 78 units sold across the entire 720-turn game despite
+peak STRAWBERRY tile counts above 30 -- a real *throughput* problem, not
+a price problem. This agent's harvest/carry/sell pipeline (one HARVEST
+action per unit per turn, same priority-0 treatment for every crop type)
+apparently cannot extract value from a STRAWBERRY-heavy mix anywhere
+near as efficiently as the real players this idea was copied from --
+they evidently do something with hand allocation or harvest cadence this
+agent doesn't, that lets a large STRAWBERRY holding actually convert to
+sales. Reverted both `CROP_TARGET_SHARE` and `SEED_RESERVE` to their
+prior values. **The underlying insight (ongoing crops sidestep the
+seed-starvation bug) is very likely still correct** -- it's this agent's
+execution that isn't equipped to capitalize on it, not the crop choice
+itself. Worth revisiting only after understanding *why* STRAWBERRY
+throughput is so low here specifically (compare HARVEST-op frequency and
+shed-arrival rate per STRAWBERRY tile against WHEAT/MELON's own, in a
+replay, before touching these constants again) -- not by just re-trying
+a bigger STRAWBERRY share blind.
 """
 
 from __future__ import annotations
