@@ -857,10 +857,9 @@ lists. The market-order-slot-starvation bug (see that note above) isn't
 just costing seed purchases -- it's also the reason this fertilizer fix
 is presently dead code in precisely the situation it was built for. Now
 that a non-mirror opponent tape exists locally, the next attempt at
-slot-starvation (the smaller-footprint idea floated above, or something
-new) should be tested against `reference/tape_kiro.py` in addition to the
-mirror-match pool opponent, to see whether the regression pattern from
-the first three attempts is really mirror-match-specific as hypothesized.
+slot-starvation should be tested against `reference/tape_kiro.py` in
+addition to the mirror-match pool opponent -- **done, see the 4th-attempt
+note below: the mirror-match-specific hypothesis was wrong.**
 
 **Animal land share raised, tried and reverted**: 22 downloaded real
 ladder replays (this session's investigation with `scripts/
@@ -896,6 +895,52 @@ converted a large flock into money more efficiently than this agent's own
 feed/sell logic does (worth checking FEED/SELL timing and price
 discipline in a real animal-heavy opponent's replay before touching this
 constant again).
+
+**Market-order-slot starvation, 4th attempt: the mirror-match hypothesis
+was wrong.** Redid the 1st attempt's fix exactly (consolidate `_build_
+feed_orders`/`_build_seed_orders`/`_build_fertilizer_orders` into one
+N-quantity order per resource/crop instead of one order per unit), this
+time testing the *full* panel: the mirror-match pool opponent, x492, and
+-- new, now that the tape off-by-one is fixed -- `reference/tape_kiro.py`
+at its recorded seed. Same-process 30-seed A/B against the pool's
+toughest opponent: 30/30 (100%) -> 21/30 (70%), mean money -18%
+($61.6k -> $50.5k) -- reproduces the 1st attempt's result almost exactly.
+Against x492: mean money -7%. **Against tape_kiro -- the actual
+non-mirror opponent the last three notes all asked for -- the same fix
+regressed even harder**: $38.5k -> $25.0k, a 35% drop, going from a
+narrow win to a clear loss, with kiro's own money *rising* slightly
+despite kiro's actions being byte-identical either way (only the shared
+market prices differ). **This conclusively rules out the mirror-match-
+specific mechanism** every prior note in this section proposed -- a
+structurally different, non-reactive opponent regressed worse than the
+mirror did, so whatever's wrong here doesn't depend on facing an
+opponent that shares this agent's own logic at all.
+
+Revised mechanism, and it's simpler: both the old and new code estimate
+affordability with the same *static* per-unit price (neither accounts
+for the fact that buying more units within one turn should walk the
+quoted price up, since the engine does that internally but this agent's
+own budgeting never re-quotes mid-loop). Under the old one-order-per-unit
+scheme, that inaccuracy was accidentally bounded -- at most ~5-9 orders
+ever fit before `maxMarketOrdersPerTurn` (10) or an earlier category
+(sell/land/hire) ate the rest, so a turn could never spend on more than
+that many *quoted-price* units of WHEAT regardless of how large `needed`
+actually was. Consolidating into a single order removes that accidental
+cap: a turn with a large accumulated `needed` (a big flock, several
+WHEAT-starved turns in a row) now requests the *entire* amount in one
+order and, if `money` clears only the same static per-unit check, the
+engine still walks the real internal price up through all of it -- likely
+spending far more in one turn, at a far worse average price, than the
+old scheme's slot-limited version ever could. This fits every data point:
+opponent-independent (matches all three panels), worse with a bigger
+flock (kiro's tape has more animals than the pool opponents), and
+consistent in direction across all 4 attempts on this bug. Reverted (again)
+to the one-order-per-unit form. **Not worth a 5th blind attempt** without
+addressing this specific mechanism -- a real fix would need to cap the
+*quantity* requested per order (e.g. `min(needed, some_cap)`), not just
+consolidate slots or cap order *count*, so a turn's WHEAT spend stays
+bounded the way the old accidental slot-limit bounded it, while still
+using only 1-2 slots instead of ~8.
 """
 
 from __future__ import annotations
