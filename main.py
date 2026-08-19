@@ -838,6 +838,29 @@ measured matchup so far -- but treat it as an untested opportunistic
 improvement, not a validated win, until either a real opponent's replay
 becomes available as a fuller (non-diverging) test vehicle or it shows up
 doing something in a future submission's downloaded replays.
+
+**Update: found the real (non-diverging) test vehicle, and it exposed why
+this fix can't fire in the exact scenario that motivated it.**
+`scripts/extract_replay_tape.py` had a real off-by-one bug (see its own
+docstring and git history) making every extracted tape replay one turn
+late for the whole game; fixed, and `reference/tape_kiro.py` now
+reproduces kiro's real actions exactly (720/720 identical) instead of
+collapsing to near-nothing. Re-running this agent against the corrected
+tape at its recorded seed: FERTILIZER does drop into this fix's cheap
+range (down to $28 by day 29, close to the original game's $11), but the
+stockpile order **still never appears** -- `_build_feed_orders` was
+already filling 9 of the 10 `maxMarketOrdersPerTurn` slots with
+individual WHEAT orders (1 SELL + 9 BUY_PRODUCT WHEAT), so the fertilizer
+order built later in `agent()`'s market list gets silently truncated away
+every single turn, confirmed directly in the replay's own `action.market`
+lists. The market-order-slot-starvation bug (see that note above) isn't
+just costing seed purchases -- it's also the reason this fertilizer fix
+is presently dead code in precisely the situation it was built for. Now
+that a non-mirror opponent tape exists locally, the next attempt at
+slot-starvation (the smaller-footprint idea floated above, or something
+new) should be tested against `reference/tape_kiro.py` in addition to the
+mirror-match pool opponent, to see whether the regression pattern from
+the first three attempts is really mirror-match-specific as hypothesized.
 """
 
 from __future__ import annotations
