@@ -792,6 +792,52 @@ selling_submitted_20260817.py`, 30/30 (100%, up from 28/30) with mean
 money up 24% ($49.6k -> $61.7k), and a small, likely-noise-level cost
 against x492 (mean money down 5.7%, still 0/30 either way -- x492 is
 unwinnable at this agent's current strength regardless). Kept.
+
+**Price-reactive fertilizer buying, kept but only partially validated**:
+analyzing 22 downloaded real ladder replays of the shipped submission
+found FERTILIZER price swinging far more than anything in the local pool
+exercises -- one animal-heavy real opponent (team "kiro", `reference/
+tape_kiro.py`) never bought a second quadrant but converted 92% of its
+starting land to PASTURE/COOP and dumped the resulting fertilizer
+byproduct it had no crops left to use, crashing the price from $100 to
+$11 over the game and still beating this agent $49k to $34k off a
+fraction of the land. `_build_fertilizer_orders` used to buy a flat,
+price-blind `FERTILIZER_RESERVE = 2` regardless of how cheap or expensive
+fertilizer was. Added a second, larger `FERTILIZER_STOCKPILE_RESERVE`
+(10) that only kicks in when price is cheap (`<=
+FERTILIZER_CHEAP_PRICE_FRAC * base`, 0.35 -- deliberately well below
+`SELL_PARAMS["FERTILIZER"]`'s own 0.50 sell threshold so this can never
+buy back at a price it would also sell at, the exact WHEAT sell/rebuy
+mistake above) **and** `want_fertilizer` (`_any_fertilizable(farm, day)`,
+the same signal fertilizer delivery already gates on) is true -- gating
+on demand was a direct response to being asked "shouldn't this only buy
+what will actually get used soon?": WHEAT/CARROT/TOMATO/STRAWBERRY
+together are most of `CROP_TARGET_SHARE`, so fertilizable land is close
+to a standing feature of this agent's own mix most of the game, but
+gating costs nothing and avoids stockpiling with nowhere to deliver it
+right after a land purchase, before the crop planner has filled the new
+tiles.
+
+**Validation is incomplete, and that's worth being honest about**: a
+same-process 30-seed A/B against the local pool's toughest opponent and
+x492 came back byte-identical between with-and-without this fix (down to
+the last dollar) -- FERTILIZER price never got anywhere near the 0.35
+cutoff in either matchup, so the new code path never fired at all; it was
+a null test, not a passing one. Tried reproducing the real kiro game
+locally via its extracted tape (`reference/tape_kiro.py`) instead, but
+hit `extract_replay_tape.py`'s own documented divergence caveat hard:
+once this agent's actions differ from the original recorded game (turn
+one), kiro's tape stops interacting with a matching reality and its
+economy collapses to near-nothing (final money $149 vs the original
+$49k) -- fertilizer never even got cheap in that run either. No local
+opponent currently reproduces the animal-dumping pattern that motivated
+this fix. Kept anyway because the change is small, unit-tested, gated
+behind both a demand check and a price band with no overlap with the
+sell threshold, and provably a no-op (not a regression) in every locally
+measured matchup so far -- but treat it as an untested opportunistic
+improvement, not a validated win, until either a real opponent's replay
+becomes available as a fuller (non-diverging) test vehicle or it shows up
+doing something in a future submission's downloaded replays.
 """
 
 from __future__ import annotations
@@ -827,6 +873,11 @@ PLANT_PRIORITY_UNDER_GATE = 1.5  # used instead of PLANT_PRIORITY while owned la
 
 SEED_RESERVE = {"MELON": 3, "WHEAT": 3, "CARROT": 3, "TOMATO": 2, "STRAWBERRY": 2}
 FERTILIZER_RESERVE = 2
+FERTILIZER_STOCKPILE_RESERVE = 10  # reserve target while price is cheap -- see
+                                    # _build_fertilizer_orders's Price-reactive note
+FERTILIZER_CHEAP_PRICE_FRAC = 0.35  # price <= this fraction of base triggers stockpiling.
+                                     # Deliberately well below SELL_PARAMS["FERTILIZER"]'s own
+                                     # 0.50 sell threshold -- see _build_fertilizer_orders
 FERTILIZER_MAX_PRICE_FRAC = 1.2  # don't buy fertilizer more than 20% over base
 
 SELL_PARAMS = {
@@ -1562,14 +1613,43 @@ def _build_seed_orders(seeds, money, days_remaining):
     return orders
 
 
-def _build_fertilizer_orders(private, prices, money):
+def _build_fertilizer_orders(private, prices, money, want_fertilizer):
+    """Tops up to the small standing FERTILIZER_RESERVE normally, but
+    stockpiles toward the larger FERTILIZER_STOCKPILE_RESERVE whenever
+    price is cheap (<= FERTILIZER_CHEAP_PRICE_FRAC * base) AND
+    `want_fertilizer` (`_any_fertilizable(farm, day)`, the same signal
+    `_decide_unit`/`_find_target` gate fertilizer delivery on) -- see the
+    module docstring's Price-reactive fertilizer buying note: a
+    downloaded replay showed FERTILIZER crash from $100 to $11 against an
+    animal-heavy opponent dumping excess byproduct, a real, large,
+    opponent-driven price swing worth buying ahead of instead of trickling
+    in a fixed 1-2 units regardless of price -- but only while there's
+    somewhere for it to actually go. WHEAT/CARROT/TOMATO/STRAWBERRY
+    together are most of `CROP_TARGET_SHARE`, so fertilizable land is
+    close to a standing feature of this agent's own crop mix most of the
+    game, not a rare event to catch -- but gating on it anyway costs
+    nothing and avoids stockpiling toward a real crop's worth of
+    fertilizer on the rare turn none of those crops are actually planted
+    (e.g. right after a land purchase, before the crop planner has
+    filled the new tiles). The baseline FERTILIZER_RESERVE is left
+    ungated, same as before this fix -- see the module docstring's
+    Selling fertilizer note for why that small a reserve's occasional
+    demand-blind churn was already judged an acceptable, bounded cost.
+    FERTILIZER_CHEAP_PRICE_FRAC is set well below
+    SELL_PARAMS["FERTILIZER"]["threshold"] (0.50) deliberately: the two
+    must never overlap, or this buys back at a price we'd also be
+    willing to sell at -- the exact self-inflicted round trip
+    _build_feed_orders's own docstring note (WHEAT sell/rebuy) already
+    found and had to back out of once."""
     have = private["shed"].get("FERTILIZER", 0) + sum(
         inv.get("FERTILIZER", 0) for inv in private["inventories"]
     )
-    if have >= FERTILIZER_RESERVE:
-        return []
     base = MARKET_PARAMS["FERTILIZER"]["base"]
     price = prices.get("FERTILIZER", base)
+    cheap = price <= base * FERTILIZER_CHEAP_PRICE_FRAC
+    reserve = FERTILIZER_STOCKPILE_RESERVE if (cheap and want_fertilizer) else FERTILIZER_RESERVE
+    if have >= reserve:
+        return []
     if price > base * FERTILIZER_MAX_PRICE_FRAC:
         return []
     if money - SAFETY_RESERVE < price:
@@ -1726,7 +1806,7 @@ def agent(obs, config=None):
     market += _build_hire_orders(farm)
     market += _build_feed_orders(farm, private, market_prices, farm["money"])
     market += _build_seed_orders(seeds, farm["money"], days_remaining)
-    market += _build_fertilizer_orders(private, market_prices, farm["money"])
+    market += _build_fertilizer_orders(private, market_prices, farm["money"], want_fertilizer)
     market += _build_animal_orders(farm, private, farm["money"])
     market = market[:MAX_MARKET_ORDERS]
 

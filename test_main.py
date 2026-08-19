@@ -267,6 +267,44 @@ def test_build_feed_orders_skipped_when_reserve_already_met():
     assert main._build_feed_orders(farm, private, prices, money=10000.0) == []
 
 
+def test_build_fertilizer_orders_stockpiles_when_price_is_cheap_and_wanted():
+    """Locks the price-reactive fertilizer buying fix (see the module
+    docstring's Price-reactive fertilizer buying note): at a cheap price
+    AND with somewhere for it to go (want_fertilizer), keep buying past
+    the normal FERTILIZER_RESERVE, all the way up to
+    FERTILIZER_STOCKPILE_RESERVE."""
+    private = {"shed": {"FERTILIZER": main.FERTILIZER_RESERVE}, "inventories": [{}]}
+    base = main.MARKET_PARAMS["FERTILIZER"]["base"]
+    prices = {"FERTILIZER": base * main.FERTILIZER_CHEAP_PRICE_FRAC}  # right at the cheap cutoff
+    orders = main._build_fertilizer_orders(private, prices, money=10000.0, want_fertilizer=True)
+    assert orders == [["BUY_PRODUCT", "FERTILIZER", 1]]  # already past FERTILIZER_RESERVE, still buys
+
+
+def test_build_fertilizer_orders_stops_at_the_normal_reserve_when_not_cheap():
+    private = {"shed": {"FERTILIZER": main.FERTILIZER_RESERVE}, "inventories": [{}]}
+    base = main.MARKET_PARAMS["FERTILIZER"]["base"]
+    prices = {"FERTILIZER": base}  # at base -- not cheap enough to trigger the stockpile reserve
+    assert main._build_fertilizer_orders(private, prices, money=10000.0, want_fertilizer=True) == []
+
+
+def test_build_fertilizer_orders_stops_at_the_normal_reserve_when_nothing_needs_it():
+    """Cheap price alone isn't enough -- without a fertilizable crop
+    anywhere on the farm, this must not stockpile toward a real crop's
+    worth of fertilizer with nowhere to deliver it."""
+    private = {"shed": {"FERTILIZER": main.FERTILIZER_RESERVE}, "inventories": [{}]}
+    base = main.MARKET_PARAMS["FERTILIZER"]["base"]
+    prices = {"FERTILIZER": base * main.FERTILIZER_CHEAP_PRICE_FRAC}  # cheap
+    assert main._build_fertilizer_orders(private, prices, money=10000.0, want_fertilizer=False) == []
+
+
+def test_build_fertilizer_orders_cheap_threshold_stays_below_the_sell_threshold():
+    """The stockpile-buy trigger and the sell trigger must never overlap,
+    or this buys back fertilizer at a price it would also sell at -- the
+    same self-inflicted round trip the reverted WHEAT sell/rebuy fix
+    already found (see main.py's docstring)."""
+    assert main.FERTILIZER_CHEAP_PRICE_FRAC < main.SELL_PARAMS["FERTILIZER"]["threshold"]
+
+
 def test_crop_planner_balances_toward_target_share():
     """MELON's target share (0.45) is furthest from 0 among an empty farm
     (WHEAT 0.25, CARROT 0.15), so an equal seed budget should be spent on
