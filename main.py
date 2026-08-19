@@ -973,6 +973,37 @@ orders`'s order-count/quantity shape without new evidence" for now,
 rather than a queue of ideas still worth blind-testing. The underlying
 slot-starvation symptom (confirmed real, confirmed blocking both seed
 purchases and the fertilizer fix) remains unaddressed.
+
+**Seed reserve doubled, tried and reverted -- catastrophically.** With
+utilization confirmed as the reason the 4th quadrant never stays
+unlocked (see the Land utilization gate notes above), and `_build_feed_
+orders` off the table per the five attempts above, doubled `SEED_RESERVE`
+(3/3/3/2/2 -> 6/6/6/4/4) on the theory that `_build_seed_orders`'s own
+order only wins a market slot a minority of turns (crowded out by feed,
+same starvation bug), so a bigger buffer on the rare turn it *does* land
+would give more planting runway before running dry -- and seed cost is a
+fixed table value, not a dynamic price, so none of the WHEAT-consolidation
+mechanisms above should apply. **Measured far worse than any other change
+this session**: same-process 30-seed A/B against the pool's toughest
+opponent, 30/30 (100%) -> 5/30 (17%), mean money -49% ($61.6k -> $31.2k);
+against x492, mean money -56% ($27.8k -> $12.2k). Investigated why with a
+seed-1 replay: crop counts and utilization were genuinely *better* than
+this agent has shown almost anywhere else this session (peak 38, still 27
+by day 26) -- the buffer-depth theory was directionally right. But money
+stayed pinned near `SAFETY_RESERVE` for the first ~19 days despite that
+healthy crop count, and the reason turned out to be the WHEAT sell/rebuy
+round trip (see that note above, and _build_feed_orders's docstring) --
+already known, already measured as a real but "bounded, acceptable" cost
+at the old WHEAT throughput. Doubling WHEAT's own reserve target
+(alongside the others) pushed enough more WHEAT through the crop cycle
+that the round trip's *volume* exploded: 124 of 480 sampled turns showed
+a same-turn `SELL WHEAT` followed by multiple `BUY_PRODUCT WHEAT` orders
+(753 sold vs. 473 bought back over 20 days) -- a cost that scales with
+WHEAT throughput and was fine at the old volume, catastrophic at the new
+one. Reverted to 3/3/3/2/2. Worth revisiting narrower: raising only the
+non-WHEAT reserves (MELON/CARROT/TOMATO/STRAWBERRY, whose seed cost isn't
+entangled with the feed round trip) untested so far, isolated from
+WHEAT's.
 """
 
 from __future__ import annotations
