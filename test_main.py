@@ -267,6 +267,33 @@ def test_build_feed_orders_skipped_when_reserve_already_met():
     assert main._build_feed_orders(farm, private, prices, money=10000.0) == []
 
 
+def test_build_seed_orders_scales_reserve_up_with_an_attractive_price():
+    """Locks the price-reactive seed reserve fix (see the module
+    docstring's Price-reactive seed reserve note): a crop trading at
+    SEED_RESERVE_PRICE_CAP times its own base price should top up to
+    SEED_RESERVE_PRICE_CAP times its baseline SEED_RESERVE, not the flat
+    baseline."""
+    seeds = {"MELON": 0}
+    base = main.MARKET_PARAMS["MELON"]["base"]
+    prices = {"MELON": base * main.SEED_RESERVE_PRICE_CAP}
+    orders = main._build_seed_orders(seeds, money=100000.0, days_remaining=20, prices=prices)
+    melon_orders = [o for o in orders if o[1] == "MELON"]
+    expected = round(main.SEED_RESERVE["MELON"] * main.SEED_RESERVE_PRICE_CAP)
+    assert len(melon_orders) == expected
+
+
+def test_build_seed_orders_does_not_shrink_reserve_below_baseline_on_a_dip():
+    """A depressed price (below base) must not shrink the reserve below
+    its normal baseline -- only ever scales up for an attractive price,
+    same asymmetry as _CropPlanner's own price handling."""
+    seeds = {"MELON": 0}
+    base = main.MARKET_PARAMS["MELON"]["base"]
+    prices = {"MELON": base * 0.3}  # well below base
+    orders = main._build_seed_orders(seeds, money=100000.0, days_remaining=20, prices=prices)
+    melon_orders = [o for o in orders if o[1] == "MELON"]
+    assert len(melon_orders) == main.SEED_RESERVE["MELON"]
+
+
 def test_build_fertilizer_orders_stockpiles_when_price_is_cheap_and_wanted():
     """Locks the price-reactive fertilizer buying fix (see the module
     docstring's Price-reactive fertilizer buying note): at a cheap price

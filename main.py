@@ -1000,10 +1000,40 @@ that the round trip's *volume* exploded: 124 of 480 sampled turns showed
 a same-turn `SELL WHEAT` followed by multiple `BUY_PRODUCT WHEAT` orders
 (753 sold vs. 473 bought back over 20 days) -- a cost that scales with
 WHEAT throughput and was fine at the old volume, catastrophic at the new
-one. Reverted to 3/3/3/2/2. Worth revisiting narrower: raising only the
-non-WHEAT reserves (MELON/CARROT/TOMATO/STRAWBERRY, whose seed cost isn't
-entangled with the feed round trip) untested so far, isolated from
-WHEAT's.
+one. Reverted to 3/3/3/2/2.
+
+**Price-reactive seed reserve, kept.** Rather than the narrower
+"non-WHEAT only" idea above, scaled each crop's own `SEED_RESERVE`
+target by how far its *current* price sits above its own base
+(`SEED_RESERVE_PRICE_CAP = 2.0`, never scaling down below baseline for a
+depressed price) -- mirrors `_CropPlanner`'s own price-attractiveness
+logic, just applied to how much to buy ahead of need instead of what to
+plant right now. The idea: WHEAT structurally has little room to trade
+far above its own base for long (its price table entry shows scarcity
+capped fairly close to base compared to the premium crops), so a
+price-scaled reserve leaves WHEAT's target close to baseline on its own,
+without a special case, while MELON/STRAWBERRY -- which do trade well
+above base when genuinely worth growing -- earn real room to stock up.
+Measured with the full panel: same-process 30-seed A/B against the
+pool's toughest opponent and x492 came back within noise of the
+unmodified baseline in both money and win rate (30/30 either way,
+well under 1% money difference) -- notably *not* the WHEAT-round-trip
+blowup the flat-doubling attempt caused, even though a spot-check replay
+showed WHEAT's own round-trip volume was, if anything, higher in raw
+terms (1998 sold / 1656 bought back vs. the flat-doubling replay's 753/
+473) -- so the earlier theory ("more WHEAT volume through the round trip
+is what makes it costly") isn't the full picture either; something about
+scaling every crop's reserve *uniformly* specifically, rather than
+price-scaling, was the more direct cause of that regression, still not
+fully pinned down. Against `reference/tape_kiro.py` (the real non-mirror
+opponent), a clean, uncontested win: $38.5k -> $48.7k (+27%), margin
+over kiro widening from $343 to $8,447 -- the best result this agent has
+shown against that opponent all session. Kept. Land utilization /
+4th-quadrant unlocking still weren't achieved in that same replay (still
+capped at 3 quadrants, still ~88% crop collapse by game end) -- the
+`SEED_RESERVE` bottleneck this was meant to test turned out not to be
+what's actually gating the 4th quadrant, but the change is a genuine,
+validated money win in its own right regardless.
 """
 
 from __future__ import annotations
@@ -1037,7 +1067,16 @@ PLANT_PRIORITY_UNDER_GATE = 1.5  # used instead of PLANT_PRIORITY while owned la
                                   # routine water (1) and beats weeding (2) and fertilizer
                                   # care (3), instead of always losing to them
 
-SEED_RESERVE = {"MELON": 3, "WHEAT": 3, "CARROT": 3, "TOMATO": 2, "STRAWBERRY": 2}
+SEED_RESERVE = {"MELON": 3, "WHEAT": 3, "CARROT": 3, "TOMATO": 2, "STRAWBERRY": 2}  # baseline,
+    # used as-is while a crop's price isn't currently attractive -- see _build_seed_orders's
+    # Price-reactive seed reserve note
+SEED_RESERVE_PRICE_CAP = 2.0  # max multiplier on SEED_RESERVE when a crop's current price is
+    # attractively above its own base -- see _build_seed_orders. Doubling SEED_RESERVE flatly
+    # for every crop was tried and reverted (catastrophic: it blew up the WHEAT sell/rebuy
+    # round trip by volume, see that module docstring note); scaling by price instead means
+    # WHEAT -- whose price rarely swings far above base -- stays close to its own baseline
+    # reserve, while a crop that's actually worth growing more of (MELON/STRAWBERRY trading
+    # well above base) gets more room to stock up
 FERTILIZER_RESERVE = 2
 FERTILIZER_STOCKPILE_RESERVE = 10  # reserve target while price is cheap -- see
                                     # _build_fertilizer_orders's Price-reactive note
@@ -1766,12 +1805,31 @@ def _build_hire_orders(farm):
     return [["HIRE"] for _ in range(remaining)]
 
 
-def _build_seed_orders(seeds, money, days_remaining):
+def _build_seed_orders(seeds, money, days_remaining, prices):
+    """Price-reactive seed reserve: each crop's target buffer is
+    `SEED_RESERVE` scaled up by how far its current price sits above its
+    own base (capped at `SEED_RESERVE_PRICE_CAP`), never scaled down
+    below the baseline for a temporary dip -- mirrors `_CropPlanner`'s own
+    price-attractiveness logic (see the module docstring's Price-
+    attractiveness-aware planting note), just applied to how much to buy
+    ahead of need instead of what to plant right now. Directly answers
+    the module docstring's Seed reserve doubled note: a flat reserve
+    increase blew up the WHEAT sell/rebuy round trip because WHEAT's
+    reserve grew by the same factor as every other crop's regardless of
+    whether WHEAT was actually worth growing more of. Scaling by price
+    instead means WHEAT -- whose price rarely swings far above its own
+    base -- stays close to its baseline reserve on its own, without a
+    special case, while a crop genuinely trading well (MELON/STRAWBERRY
+    above base) earns more room to stock up."""
     orders = []
     remaining = money - SAFETY_RESERVE
-    for crop, reserve in SEED_RESERVE.items():
+    for crop, base_reserve in SEED_RESERVE.items():
         if days_remaining < CROPS[crop]["first_yield_day"] + SEED_BUFFER_DAYS:
             continue  # wouldn't mature (and sell) before the season ends
+        base_price = MARKET_PARAMS[crop]["base"]
+        price = prices.get(crop, base_price)
+        price_ratio = max(1.0, price / base_price) if base_price else 1.0
+        reserve = round(base_reserve * min(price_ratio, SEED_RESERVE_PRICE_CAP))
         have = seeds.get(crop, 0)
         cost = CROPS[crop]["seed"]
         while have < reserve and remaining >= cost:
@@ -1973,7 +2031,7 @@ def agent(obs, config=None):
     market += _build_land_orders(farm, days_remaining)
     market += _build_hire_orders(farm)
     market += _build_feed_orders(farm, private, market_prices, farm["money"])
-    market += _build_seed_orders(seeds, farm["money"], days_remaining)
+    market += _build_seed_orders(seeds, farm["money"], days_remaining, market_prices)
     market += _build_fertilizer_orders(private, market_prices, farm["money"], want_fertilizer)
     market += _build_animal_orders(farm, private, farm["money"])
     market = market[:MAX_MARKET_ORDERS]
