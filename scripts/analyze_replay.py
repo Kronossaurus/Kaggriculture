@@ -5,12 +5,13 @@ is used directly) and downloaded Kaggle replays (`kaggle competitions
 replay <episode_id>`, real `TeamNames` -- matched by name so "us" is
 correct regardless of which seat we were assigned).
 
-Grew out of two ad hoc investigations this session (comparing a local
-main.py vs reference/x492_nah_i_d_win.py replay, then a batch of 8 real
-ladder episodes from a submission) -- see main.py's own docstring's
-Market-order-slot starvation and Planting priority under the gate notes
-for what those investigations found. Meant to be incrementally extended,
-not a one-off script.
+Grew out of several ad hoc investigations this session (comparing a local
+main.py vs reference/x492_nah_i_d_win.py replay, a batch of 8 real ladder
+episodes from a submission, then a deep dive on one of them plus a
+crop-collapse / animal-share pattern check across the full batch) -- see
+main.py's own docstring's Market-order-slot starvation and Planting
+priority under the gate notes for what those investigations found. Meant
+to be incrementally extended, not a one-off script.
 
 Usage:
     uv run scripts/analyze_replay.py replays/vs_x492.json
@@ -24,6 +25,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 from collections import Counter
 from pathlib import Path
 
@@ -133,6 +135,8 @@ def analyze_one(path: Path, our_team: str, us_override: int | None, show_traject
             print(f"  day {day:>2}: {label} unlocked -> {uq}")
 
     peak_crop = {us: 0, opp: 0}
+    peak_crop_day = {us: 0, opp: 0}
+    peak_animal = {us: 0, opp: 0}
     if show_trajectory:
         print(f"  {'day':>4} {'money_us':>9} {'own':>4} {'crop':>5} {'anim':>5} {'weed':>5}"
               f" | {'money_opp':>9} {'own':>4} {'crop':>5} {'anim':>5} {'weed':>5}")
@@ -144,7 +148,10 @@ def analyze_one(path: Path, our_team: str, us_override: int | None, show_traject
         for pi in (us, opp):
             owned, _empty, counts = tile_stats(obs["farms"][pi])
             crop, animal = crop_and_animal_counts(counts)
-            peak_crop[pi] = max(peak_crop[pi], crop)
+            if crop > peak_crop[pi]:
+                peak_crop[pi] = crop
+                peak_crop_day[pi] = day
+            peak_animal[pi] = max(peak_animal[pi], animal)
             row[pi] = (obs["farms"][pi]["money"], owned, crop, animal, counts.get("WEED", 0))
         if show_trajectory:
             mu, ou, cu, au, wu = row[us]
@@ -153,21 +160,39 @@ def analyze_one(path: Path, our_team: str, us_override: int | None, show_traject
                   f" | {mo:>9,.0f} {oo:>4} {co:>5} {ao:>5} {wo:>5}")
 
     final_obs = final and steps[-1][0]["observation"]
+    final_crop = {}
+    final_animal_share = {}
     for label, pi in (("us", us), ("opp", opp)):
         owned, _empty, counts = tile_stats(final_obs["farms"][pi])
         crop, animal = crop_and_animal_counts(counts)
         util = (crop + animal) / owned * 100 if owned else 0.0
-        print(f"  final {label}: owned={owned} crop={crop} anim={animal} "
-              f"weed={counts.get('WEED', 0)} util={util:.1f}%  (peak crop this game: {peak_crop[pi]})")
+        animal_share = animal / owned * 100 if owned else 0.0
+        final_crop[pi] = crop
+        final_animal_share[pi] = animal_share
+        collapse = (1 - crop / peak_crop[pi]) * 100 if peak_crop[pi] else 0.0
+        print(f"  final {label}: owned={owned} crop={crop} anim={animal} ({animal_share:.1f}% of land) "
+              f"weed={counts.get('WEED', 0)} util={util:.1f}%  "
+              f"(peak crop {peak_crop[pi]} on day {peak_crop_day[pi]}, {collapse:.0f}% collapsed by game end; "
+              f"peak animal {peak_animal[pi]})")
 
     return {
         "path": path.name, "opponent": opp_name, "seed": seed, "result": result,
         "us_money": us_money, "opp_money": opp_money,
         "peak_crop_us": peak_crop[us], "peak_crop_opp": peak_crop[opp],
+        "final_crop_us": final_crop[us], "final_crop_opp": final_crop[opp],
+        "peak_animal_us": peak_animal[us], "peak_animal_opp": peak_animal[opp],
+        "final_animal_share_us": final_animal_share[us], "final_animal_share_opp": final_animal_share[opp],
     }
 
 
 def main() -> None:
+    # Team names are free-text from real Kaggle accounts and routinely include characters
+    # outside Windows' default console codepage (cp1252) -- e.g. Turkish 'Ş'. Reconfigure
+    # instead of crashing mid-batch on whichever replay happens to hit one.
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(errors="replace")
+
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("paths", nargs="+", help="Replay JSON file(s), directory, or glob pattern")
     parser.add_argument("--our-team", default=DEFAULT_OUR_TEAM,
@@ -190,10 +215,24 @@ def main() -> None:
             rows.append(row)
 
     if len(rows) > 1:
+        n = len(rows)
         wins = sum(1 for r in rows if r["result"] == "W")
-        print(f"\n\n=== SUMMARY: {wins}/{len(rows)} wins "
-              f"(peak crop mean us={sum(r['peak_crop_us'] for r in rows) / len(rows):.1f}, "
-              f"opp={sum(r['peak_crop_opp'] for r in rows) / len(rows):.1f}) ===")
+
+        def collapse_pct(r: dict, side: str) -> float:
+            peak = r[f"peak_crop_{side}"]
+            return (1 - r[f"final_crop_{side}"] / peak) * 100 if peak else 0.0
+
+        print(f"\n\n=== SUMMARY: {wins}/{n} wins ===")
+        print(f"peak crop mean:    us={sum(r['peak_crop_us'] for r in rows) / n:5.1f}   "
+              f"opp={sum(r['peak_crop_opp'] for r in rows) / n:5.1f}")
+        print(f"crop collapse %:   us={sum(collapse_pct(r, 'us') for r in rows) / n:5.1f}%  "
+              f"opp={sum(collapse_pct(r, 'opp') for r in rows) / n:5.1f}%  "
+              f"(fraction of peak crop count lost by game end)")
+        print(f"peak animal mean:  us={sum(r['peak_animal_us'] for r in rows) / n:5.1f}   "
+              f"opp={sum(r['peak_animal_opp'] for r in rows) / n:5.1f}")
+        print(f"final animal share: us={sum(r['final_animal_share_us'] for r in rows) / n:5.1f}%  "
+              f"opp={sum(r['final_animal_share_opp'] for r in rows) / n:5.1f}%  "
+              f"(animal tiles / owned land at game end)")
         for r in rows:
             print(f"{r['result']}  us=${r['us_money']:>10,.0f}  opp=${r['opp_money']:>10,.0f}  "
                   f"vs {r['opponent']!r:25s} seed={r['seed']} ({r['path']})")
