@@ -941,6 +941,38 @@ addressing this specific mechanism -- a real fix would need to cap the
 consolidate slots or cap order *count*, so a turn's WHEAT spend stays
 bounded the way the old accidental slot-limit bounded it, while still
 using only 1-2 slots instead of ~8.
+
+**5th attempt: exactly that idea, tried, still worse.** Also consolidated
+`_build_seed_orders` fully (safe -- seed cost is a fixed table value, not
+a dynamic price, so the WHEAT mechanism above can't apply there) and
+`_build_fertilizer_orders` fully (safe in practice -- its own reserve
+targets already hard-cap `needed` far below WHEAT's animal-count-scaled
+deficit). For `_build_feed_orders`, added `FEED_ORDER_QUANTITY_CAP = 8`:
+one order requesting `min(needed, 8)` -- restoring, on purpose, roughly
+the same per-turn quantity ceiling the old one-order-per-unit form got by
+accident from `maxMarketOrdersPerTurn`, but in 1 slot instead of ~8.
+Measured against the same panel: mirror-match pool opponent improved
+somewhat over the 4th attempt (30/30 -> 27/30, -11% money, vs. attempt
+4's 30/30 -> 21/30, -18%) but still a real regression, not a wash. x492:
+-17% money, similar to before. **Against `tape_kiro`, the one opponent
+that matters most here, it got *worse* than the 4th attempt**: $38.5k ->
+$22.8k (-41%, vs. attempt 4's -35%), the narrow win flipping to an even
+larger loss. So capping the *quantity* at a fixed guess (8) didn't
+recover what full consolidation lost, and did measurably worse on the
+one non-mirror opponent this whole investigation was trying to serve.
+Reverted a 5th time. The "static price doesn't scale with quantity"
+mechanism from the 4th-attempt note is evidently not the whole
+explanation either, or `FEED_ORDER_QUANTITY_CAP=8` was simply the wrong
+number -- unclear which without more instrumentation than a same-process
+A/B provides (e.g. tracking actual realized WHEAT purchase prices turn by
+turn, old vs. new, in the same replay). **Five attempts across two
+sessions have now failed to improve on the original one-order-per-unit
+form** (sell-side WHEAT reserve, full consolidation x2, order-count cap,
+quantity cap) -- treat this as a settled "don't touch `_build_feed_
+orders`'s order-count/quantity shape without new evidence" for now,
+rather than a queue of ideas still worth blind-testing. The underlying
+slot-starvation symptom (confirmed real, confirmed blocking both seed
+purchases and the fertilizer fix) remains unaddressed.
 """
 
 from __future__ import annotations
