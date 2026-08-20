@@ -312,6 +312,41 @@ chronically throttles buy frequency -- e.g. something that changes *which*
 turns feed is allowed to buy on (favor cheap-price turns) rather than *how
 many* orders it's allowed per turn.
 
+An eighth attempt tried exactly the minimal version of that within the
+"free slots for seed" family: no cap at all, just reorder `agent()`'s
+market list to put `_build_seed_orders` ahead of `_build_feed_orders`
+(seed rarely needs more than 1-2 slots on an average turn, so this should
+only cost feed a slot on the rare turn both compete, leaving feed's normal
+~8-9-slot turns untouched otherwise). It regressed *worse* than the
+seventh attempt: pool 146W-64L -> 118W-92L (69.5% -> 56.2%), `tape_kiro`
+63.3% -> 6.7% (same as the 7th), and the two mirror opponents fell to
+3.3%/0.0% (worse than the 7th's 6.7%/6.7% each). A same-seed replay pair
+against `tape_kiro` showed why the "seed rarely needs more than 1-2"
+assumption was wrong in practice: `_build_seed_orders` replaces every seed
+a unit consumed by planting *that same turn*, so a turn where several
+units all plant simultaneously (e.g. right after the land-utilization gate
+opens up a burst of empty tiles) needs several seed orders at once --
+exactly the same turns feed also has a large backlog, so seed's burst
+demand, now front-of-list, ate far more of feed's slots than the mean
+seed-orders/turn figure suggested (feed's occupancy fell from a steady
+~8/turn to 0-2/turn for long stretches, not just an occasional single
+slot). The opponent's own money rose 28% ($44,319 -> $56,730) on that
+matched seed despite running a fixed, non-reactive tape -- the standing
+WHEAT-price mechanism again, this time triggered by burst competition for
+list position rather than either sell volume or buy pacing.
+
+**Both members of the "give seed priority over feed within the same
+turn's order list" family (a hard per-turn cap, and pure list reordering)
+have now failed, each roughly as badly as the sell-volume-based sixth
+attempt.** Don't retry a third variant of this family (e.g. a *dynamic*
+cap, or reordering only above some threshold) without a fundamentally
+different idea -- the failure mode isn't sensitive to the specific
+mechanism used to hand seed a slot at feed's expense, only to the fact
+that feed's own order volume/timing gets disturbed at all. The module
+docstring's earlier suggestion (make feed favor *which* turns it buys on,
+by price, rather than changing its slot count) is a genuinely different
+family, still untried.
+
 Still out of scope: any opponent modeling -- this agent only ever reacts to
 its own farm/market state. See rl/README.md for the parallel (currently
 stalled) attempt at a learned policy. See this project's session memory for
@@ -1196,8 +1231,10 @@ def _build_feed_orders(farm, private, prices, money):
     `_build_seed_orders` in `agent()`'s market list: missing a seed buy
     delays a planting one turn, missing a feed loses the whole animal.
 
-    Don't retry a per-turn order-count cap here without new evidence -- see
-    the module docstring's Market-order-slot starvation note, 7th attempt."""
+    Don't retry giving `_build_seed_orders` priority over this -- by a hard
+    per-turn cap on feed, or by reordering the list -- without new evidence.
+    See the module docstring's Market-order-slot starvation note, 7th and
+    8th attempts."""
     live = _live_animal_count(farm)
     if live == 0:
         return []
