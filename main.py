@@ -280,6 +280,38 @@ real and still unaddressed; don't retry either the reserve-sizing or the
 same-turn-coordination shape again without a new idea that doesn't suppress
 aggregate WHEAT sell volume.
 
+A seventh attempt tried a different lever specifically to avoid that trap:
+cap `_build_feed_orders` at `FEED_ORDER_CAP_PER_TURN` orders per turn
+instead of touching sell-side volume at all. Reasoning at the time: `needed`
+recomputes fresh from `reserve - have` every turn, so a capped remainder
+just carries over and gets bought next turn -- same total WHEAT bought over
+the season at the same per-unit prices, only spread across more turns,
+which should leave the standing supply/demand price level alone. It
+regressed just as hard as the sixth attempt anyway: pool 146W-64L -> 124W-
+86L (69.5% -> 59.0%), `tape_kiro` 63.3% -> 6.7%, and both close-mirror
+opponents (`main_plant_priority_submitted_20260818.py`,
+`main_price_reactive_seed_reserve_submitted_20260819.py`) collapsed from
+33.3%/53.3% to 6.7%/6.7% each. `--purchase-trace WHEAT` on a same-seed
+mirror-matchup pair confirmed it's the *same* standing-price mechanism as
+the sixth attempt (mean implied WHEAT purchase price $17.30 -> $36.78,
+2.1x, with `next/decision_ratio` flat ~1.00 in both -- ruling out the
+first five attempts' within-order-price-walk mechanism again): capping the
+catch-up rate keeps the shed chronically under `reserve` instead of
+occasionally over-buying in a lump and leaving the market alone in between,
+turning the agent into a near-permanent marginal WHEAT buyer that keeps
+pushing its own purchase price up. The reasoning above about total volume
+being unchanged was correct but insufficient -- *when* and *how evenly*
+that volume gets bought matters just as much as how much, and a
+per-turn cap forces the worst pattern (constant small buys) instead of the
+better one (occasional lump buys with recovery time between). Freeing
+order slots for seed is confirmed real (seed orders went from a flat 0.00
+to ~0.2-0.5/turn) but is still not sufficient on its own if the mechanism
+used to free them turns feed into a chronic rather than occasional buyer.
+Any eighth attempt needs a shape that neither reduces sell volume nor
+chronically throttles buy frequency -- e.g. something that changes *which*
+turns feed is allowed to buy on (favor cheap-price turns) rather than *how
+many* orders it's allowed per turn.
+
 Still out of scope: any opponent modeling -- this agent only ever reacts to
 its own farm/market state. See rl/README.md for the parallel (currently
 stalled) attempt at a learned policy. See this project's session memory for
@@ -1162,7 +1194,10 @@ def _build_feed_orders(farm, private, prices, money):
     shed can sit at 0 WHEAT for turns at a stretch -- see the module
     docstring's WHEAT sell/rebuy round trip note. Placed ahead of
     `_build_seed_orders` in `agent()`'s market list: missing a seed buy
-    delays a planting one turn, missing a feed loses the whole animal."""
+    delays a planting one turn, missing a feed loses the whole animal.
+
+    Don't retry a per-turn order-count cap here without new evidence -- see
+    the module docstring's Market-order-slot starvation note, 7th attempt."""
     live = _live_animal_count(farm)
     if live == 0:
         return []
