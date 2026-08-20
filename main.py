@@ -527,6 +527,49 @@ valid feed trip" from "safe to bank") -- not yet tried.
 Twelve attempts across four sessions plus one threshold-sweep redo: eleven
 reverted, this one kept as a real (if narrow) correctness improvement.
 
+**A thirteenth attempt did exactly what the twelfth's note asked for --
+lower the anti-livelock margin using the real feed-need signal instead of
+a quantity threshold -- and it regressed just as hard as every purely
+economic attempt before it.** Added `_any_unfed_animal(farm)` (mirrors
+`_any_fertilizable`) and replaced `WHEAT_SHED_RETURN_THRESHOLD` with a
+`want_wheat_feed` gate on both `_find_target`'s `carried_produce_total`
+and `_decide_unit`'s `carried_produce`, exactly mirroring FERTILIZER's
+own `(k != "FERTILIZER" or not want_fertilizer or liquidating)` pattern.
+This is principled rather than a guessed number: WHEAT is protected from
+DROP for exactly as long as some live animal still needs it, and released
+the instant nothing does (or once liquidating) -- so a large accumulated
+surplus banks immediately once safe, not just above a fixed size. Two new
+regression tests confirmed both halves of the guard hold and release
+correctly.
+
+**Regressed to `tape_kiro` 63.3% -> 0.0% (0W-30L)** -- as bad as the
+worst attempts in this entire investigation (6, 7, 9, and the 10th's
+larger magnitude). A same-seed trace showed real behavior change this
+time (unlike the 12th): `total_requested` WHEAT dropped 3815 -> 3181, and
+mid-game order-slot saturation genuinely improved on several days (e.g.
+day 15: feed 8.46 -> 1.83) -- but `mean_implied_avg_price` still rose
+(20.85 -> 27.01) and the late game reverted to the same 100%-saturated
+pattern as baseline anyway. **This is the most direct confirmation yet
+that the standing-price mechanism isn't specific to any one lever** (sell
+volume, buy pacing, order position, reserve size, production share) --
+it's a property of changing this agent's aggregate WHEAT market behavior
+*at all*, even via a change that's structurally correct, passes every
+unit test, and demonstrably lets organic harvest reach the shed as
+intended. **Reverted** (never committed).
+
+Thirteen attempts across four sessions plus one threshold-sweep redo: all
+but the twelfth (a narrow, low-impact correctness fix) have failed. The
+implication worth taking seriously now: this may not be fixable by
+changing *this agent's own* WHEAT buy/sell/carry logic at all, at least
+not against `tape_kiro` specifically -- every angle that changes real
+aggregate behavior, regardless of mechanism, correctness, or how well-
+reasoned, has hit the same wall. A fourteenth attempt should have a clear
+answer for why it would be different in kind, not just in mechanism, or
+should look outside this agent's own market-order logic entirely (e.g.
+whether `tape_kiro`'s specific tape makes it an unusually adversarial
+sentinel worth checking against a wider, more representative panel before
+any future attempt is judged solely against it).
+
 Still out of scope: any opponent modeling -- this agent only ever reacts to
 its own farm/market state. See rl/README.md for the parallel (currently
 stalled) attempt at a learned policy. See this project's session memory for
