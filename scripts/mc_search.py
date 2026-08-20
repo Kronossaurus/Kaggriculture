@@ -123,13 +123,13 @@ def make_trial_agent(base_src: str, params: dict[str, float | int], trial_id: in
     return path
 
 
-def evaluate(agent_path: str, pool: list[str], seeds: int, steps: int) -> dict:
+def evaluate(agent_path: str, pool: list[str], seeds: int, steps: int, play_fn=play) -> dict:
     wins = losses = ties = 0
     margin_sum = 0.0
     n = 0
     for opponent_path in pool:
         for seed in range(1, seeds + 1):
-            own, opp = play(agent_path, opponent_path, seed, steps)
+            own, opp = play_fn(agent_path, opponent_path, seed, steps)
             n += 1
             margin_sum += own - opp
             if own > opp:
@@ -156,6 +156,14 @@ def main() -> None:
         "--params", nargs="+", default=None, choices=list(PARAM_SPACE),
         help="Subset of PARAM_SPACE to vary (default: all of it)",
     )
+    parser.add_argument(
+        "--engine", choices=["python", "fast"], default="python",
+        help="'fast' drives episodes through cpp_sim/'s C++ port via cpp_bridge.py instead of "
+             "kaggle_environments -- ~4.7x faster in practice for main.py (see cpp_sim/README.md; "
+             "not the notebook's headline number, which is environment-only). Validated bit-exact "
+             "against the real environment for deterministic agents (main.py, reference/*.py); "
+             "needs cpp_sim/kag_sim.dll built first (see cpp_sim/README.md).",
+    )
     args = parser.parse_args()
 
     base_path = resolve_agent(args.base)
@@ -164,15 +172,20 @@ def main() -> None:
     rng = random.Random(args.rng_seed)
     active = {k: PARAM_SPACE[k] for k in (args.params or PARAM_SPACE)}
 
+    play_fn = play
+    if args.engine == "fast":
+        from cpp_bridge import play_fast
+        play_fn = play_fast
+
     print(f"=== MC search: {args.trials} trials, {args.seeds} seeds x {len(pool)} opponents each, "
-          f"varying {list(active)} ===\n")
+          f"varying {list(active)}, engine={args.engine} ===\n")
     RESULTS_PATH.parent.mkdir(parents=True, exist_ok=True)
     results = []
     with RESULTS_PATH.open("w", encoding="utf-8") as out:
         for trial_id in range(1, args.trials + 1):
             params = sample_params(rng, active)
             trial_path = make_trial_agent(base_src, params, trial_id)
-            score = evaluate(str(trial_path), pool, args.seeds, args.steps)
+            score = evaluate(str(trial_path), pool, args.seeds, args.steps, play_fn=play_fn)
             row = {"trial": trial_id, "params": params, **score}
             results.append(row)
             out.write(json.dumps(row) + "\n")

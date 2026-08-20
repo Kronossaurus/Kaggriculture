@@ -79,19 +79,29 @@ def main() -> None:
     )
     parser.add_argument("--seeds", type=int, default=20, help="Episodes per opponent, seeds 1..N (default: 20)")
     parser.add_argument("--steps", type=int, default=720, help="episodeSteps per episode (default: 720)")
+    parser.add_argument(
+        "--engine", choices=["python", "fast"], default="python",
+        help="'fast' drives episodes through cpp_sim/'s C++ port via cpp_bridge.py instead of "
+             "kaggle_environments (see cpp_sim/README.md); needs cpp_sim/kag_sim.dll built first.",
+    )
     args = parser.parse_args()
+
+    play_fn = play
+    if args.engine == "fast":
+        from cpp_bridge import play_fast
+        play_fn = play_fast
 
     agent_path = resolve_agent(args.agent)
     pool = [(spec, resolve_agent(spec)) for spec in args.pool]
 
-    print(f"=== {args.agent} vs pool ({args.seeds} seeds each, {args.steps} steps) ===\n")
+    print(f"=== {args.agent} vs pool ({args.seeds} seeds each, {args.steps} steps, engine={args.engine}) ===\n")
 
     total_w = total_l = total_t = 0
     for label, opponent_path in pool:
         w = l = t = 0
         own_sum = opp_sum = 0.0
         for seed in range(1, args.seeds + 1):
-            own, opp = play(agent_path, opponent_path, seed, args.steps)
+            own, opp = play_fn(agent_path, opponent_path, seed, args.steps)
             own_sum += own
             opp_sum += opp
             if own > opp:

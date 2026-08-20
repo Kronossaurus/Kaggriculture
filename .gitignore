@@ -231,3 +231,8 @@ reference/community_dataset/
 .omc/
 .mcp.json
 
+# cpp_sim/ build output -- rebuild locally (see cpp_sim/README.md), not committed
+cpp_sim/*.dll
+cpp_sim/*.exe
+cpp_sim/*.o
+
