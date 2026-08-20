@@ -471,22 +471,61 @@ shot harvest (`interval=0`, replant every cycle) at 25% of the crop mix,
 so a large fraction of units are carrying *some* small amount of WHEAT
 almost continuously. Once that counts toward `carried_produce`, each of
 those small harvests can trigger a dedicated shed trip (routine priority
-5, or urgent priority 2 once `CARRIED_PRODUCE_URGENT_THRESHOLD=3` is hit
--- trivially easy with WHEAT's own max_yield of 6/harvest), pulling units
-away from routine watering/weeding often enough that crops rot into
-weeds faster than they can be tended. **Reverted** (never committed).
+5, or urgent priority 2 once `CARRIED_PRODUCE_URGENT_THRESHOLD=3` is hit),
+pulling units away from routine watering/weeding often enough that crops
+rot into weeds faster than they can be tended. **Reverted** (never
+committed).
 
 The underlying gap is real and still unfixed -- WHEAT genuinely has no
 organic path to the shed today, unlike every other crop -- but naively
 treating it identically to slower-cycling, lower-volume crops in the same
-priority/threshold scheme is itself the new failure mode. Any twelfth
-attempt needs WHEAT to reach the shed without generating a dedicated trip
-for every small, frequent harvest -- e.g. only counting it toward
-`carried_produce`/triggering a return once a unit is already carrying a
-larger amount (a WHEAT-specific threshold, distinct from
-`CARRIED_PRODUCE_URGENT_THRESHOLD`), or piggybacking it onto shed trips
-already happening for other reasons instead of ever justifying one on its
-own -- not a blanket inclusion in the existing mechanic.
+priority/threshold scheme is itself the new failure mode.
+
+**A twelfth attempt, kept.** Added `WHEAT_SHED_RETURN_THRESHOLD = 5`:
+`_find_target` now generates a dedicated shed-return candidate once a
+unit carries at least that much WHEAT (kept out of
+`carried_produce_total`/the urgent-priority check, so it's always routine
+priority 5, never urgent -- avoiding the 11th attempt's direct collision
+with weeding), and `_decide_unit`'s `carried_produce` DROP-eligibility
+check now includes WHEAT under the same threshold. First test at
+threshold 4 reproduced the 11th attempt's exact weed-collapse again --
+diffing the two replays' actions showed only 1 of 720 turns differed,
+proving the real bug wasn't trip generation at all: it was
+`_decide_unit`'s DROP check running on the very next turn after a
+`["PICKUP", "WHEAT", n]` for feed (up to 4 units, see `_decide_unit`'s own
+PICKUP call) while the unit is still standing at the shed tile, seeing its
+own freshly-fetched feed WHEAT in `carried_produce`, and dropping it right
+back before ever walking to the animal -- the same livelock family the
+FERTILIZER guard immediately above already exists to prevent (see
+`test_decide_unit_keeps_freshly_picked_up_fertilizer_when_still_needed`),
+just not yet extended to WHEAT. (Confirmed empirically that WHEAT's own
+`yield_units` is always exactly 1 per harvest in practice, not up to
+`max_yield=6` as assumed when picking the first threshold -- `max_yield`
+evidently isn't "units per harvest" for a single-shot, `interval=0` crop.)
+Raising the threshold to 5 (strictly above PICKUP's 4-unit cap) fixes the
+livelock: the same traced seed now nearly exactly reproduces the
+baseline's own trajectory (win instead of catastrophic loss, weed count
+back to 1, `--purchase-trace` numbers matching baseline within noise).
+Validated with the full 30-seed protocol: `tape_kiro` 63.3% -> 60.0%
+(18W-12L, noise-level) and pool 69.5% -> 69.5% (146W-64L, identical) --
+confirmed safe, no regression anywhere.
+
+**Kept as a genuine correctness fix, not a starvation-bug fix.** Because
+WHEAT yields exactly 1/harvest, a threshold of 5 (the minimum that avoids
+the livelock) rarely triggers in practice -- a unit would need to harvest
+5 separate WHEAT tiles before doing anything else, which routing priority
+rarely allows. So this closes the *gap* (WHEAT-only carry no longer gets
+permanently stranded) without materially changing the *starvation*
+symptom this whole investigation started from -- the neutral 30-seed
+result confirms this precisely: no worse, but not meaningfully better
+either. A thirteenth attempt wanting WHEAT to flow to the shed *more*
+often would need to lower this threshold, which requires first lowering
+PICKUP's own 4-unit feed-fetch cap to keep the anti-livelock margin (or
+finding a non-quantity-based way to distinguish "just fetched for a still-
+valid feed trip" from "safe to bank") -- not yet tried.
+
+Twelve attempts across four sessions plus one threshold-sweep redo: eleven
+reverted, this one kept as a real (if narrow) correctness improvement.
 
 Still out of scope: any opponent modeling -- this agent only ever reacts to
 its own farm/market state. See rl/README.md for the parallel (currently
@@ -537,6 +576,13 @@ SHED_RETURN_URGENT_PRIORITY = 2  # _find_target's priority for walking carried p
                                   # nearby routine chore first (the case that already worked
                                   # fine) while still capping how much value piles up in carry
 CARRIED_PRODUCE_URGENT_THRESHOLD = 3  # see SHED_RETURN_URGENT_PRIORITY
+WHEAT_SHED_RETURN_THRESHOLD = 5  # minimum carried WHEAT before it's worth a dedicated trip to
+    # the shed (_find_target) or before it's eligible to DROP once already there
+    # (_decide_unit) -- 12th market-order-slot-starvation attempt. Must exceed the 4-unit cap
+    # on a feed PICKUP (see _decide_unit's own PICKUP WHEAT call) or a freshly-picked-up
+    # feed batch would immediately qualify for DROP and livelock right back into the shed
+    # -- see _decide_unit's carried_produce comment for the full story (this was the actual
+    # bug behind the 11th/12th attempts' weed-count explosion, not a trip-generation issue)
 
 SEED_RESERVE = {"MELON": 3, "WHEAT": 3, "CARROT": 3, "TOMATO": 2, "STRAWBERRY": 2}  # baseline,
     # used as-is while a crop's price isn't currently attractive -- see the module
@@ -1076,7 +1122,18 @@ def _find_target(
     needs_fertilizer = inv.get("FERTILIZER", 0) == 0 and want_fertilizer and not liquidating
     needs_wheat = inv.get("WHEAT", 0) <= 0 and any_unfed and shed_wheat_available
     needs_animal_pickup = animal_planner.wants_pickup() and not any(inv.get(k, 0) > 0 for k in ANIMAL_KINDS)
-    if carrying_produce or needs_fertilizer or needs_wheat or needs_animal_pickup:
+    # A large carried WHEAT batch is worth a dedicated trip too (12th market-order-slot-
+    # starvation attempt -- see the module docstring), but deliberately kept out of
+    # carried_produce_total/the urgent-priority check above: the 11th attempt counted every
+    # carried WHEAT unit there and caused a weed-count explosion (8->34/75 tiles), because
+    # WHEAT's fast, frequent, single-shot harvests trivially cross CARRIED_PRODUCE_URGENT_
+    # THRESHOLD on their own, putting a routine WHEAT carry in direct priority competition
+    # with weeding every time. Gating on a WHEAT-specific minimum (bigger than a typical
+    # partial harvest) and always at routine shed_priority, never urgent, avoids both
+    # failure modes: small/frequent carries generate no trip at all, and even a big one
+    # never outranks weeding/watering.
+    returning_wheat = inv.get("WHEAT", 0) >= WHEAT_SHED_RETURN_THRESHOLD
+    if carrying_produce or needs_fertilizer or needs_wheat or needs_animal_pickup or returning_wheat:
         if needs_wheat:
             priority = -1
         elif carried_produce_total >= CARRIED_PRODUCE_URGENT_THRESHOLD:
@@ -1147,9 +1204,20 @@ def _decide_unit(
             return ["PLACE", item, n]
         carried_produce = {
             k: n for k, n in inv.items()
-            if n > 0 and k not in ("WHEAT", *ANIMAL_KINDS)
+            if n > 0 and k not in ANIMAL_KINDS
             and (k != "FERTILIZER" or not want_fertilizer or liquidating)
+            and (k != "WHEAT" or n >= WHEAT_SHED_RETURN_THRESHOLD)
         }
+        # WHEAT is included here (unlike _find_target's carried_produce_total above), but
+        # gated at the same WHEAT_SHED_RETURN_THRESHOLD -- without this, a unit that just
+        # PICKUP'd WHEAT for feed (up to 4 units, main.py's own PICKUP call below) would see
+        # its own freshly-picked-up WHEAT here on the very next decision and immediately
+        # DROP it right back before ever walking to the animal that needed it -- a livelock
+        # in the same family the FERTILIZER guard right above already exists to prevent (see
+        # test_decide_unit_keeps_freshly_picked_up_fertilizer_when_still_needed), just not
+        # yet extended to WHEAT. Threshold must exceed PICKUP's own 4-unit cap for the guard
+        # to actually work -- this was the real bug behind the 11th/12th attempts' weed-count
+        # explosion, not the trip-generation concern _find_target's own gate addresses.
         if carried_produce:
             claimed.add((fx, fy))
             return ["DROP"]

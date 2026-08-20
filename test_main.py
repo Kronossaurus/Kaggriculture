@@ -171,6 +171,30 @@ def test_decide_unit_keeps_freshly_picked_up_fertilizer_when_still_needed():
     assert action == ["EAST"]  # walks toward the fertilizable tile at (2, 2), doesn't DROP
 
 
+def test_decide_unit_keeps_freshly_picked_up_wheat_below_the_threshold():
+    """Same livelock family as the FERTILIZER test above, for WHEAT (12th
+    market-order-slot-starvation attempt, see the module docstring): a
+    unit standing at the shed holding a freshly PICKUP'd WHEAT batch for
+    animal feed (up to 4 units -- see _decide_unit's own PICKUP WHEAT
+    call) must NOT immediately DROP it back, or every feed pickup
+    livelocks PICKUP/DROP forever. This was the actual bug behind the
+    11th attempt's weed-count explosion (8->34 of 75 tiles) -- diffing
+    that replay against a corrected one showed only 1 of 720 turns
+    differed, proving it wasn't a trip-generation issue at all.
+    WHEAT_SHED_RETURN_THRESHOLD=5 must exceed PICKUP's 4-unit cap for
+    this guard to actually hold."""
+    farm = _farm({})
+    planner = main._CropPlanner({"seeds": {}}, farm, days_remaining=20)
+    animal_planner = main._AnimalPlanner(farm, {}, {})
+    action = main._decide_unit(
+        pos=[0, 0], inv={"WHEAT": 4}, farm=farm, private={"shed": {}}, day=0, board_size=3,
+        claimed=set(), planner=planner, animal_planner=animal_planner, shed_tiles={(0, 0)},
+        want_fertilizer=False, liquidating=False, animal_zone=set(),
+        quadrant_util=_NEUTRAL_QUADRANT_UTIL, plant_priority=main.PLANT_PRIORITY,
+    )
+    assert action != ["DROP"]
+
+
 def test_decide_unit_sells_fertilizer_during_liquidation_even_if_still_wanted():
     """See the module docstring's Endgame liquidation (fertilizer) note: a
     replay showed real, ongoing dollar value sitting in unit inventories
