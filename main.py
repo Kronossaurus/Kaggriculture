@@ -347,6 +347,55 @@ docstring's earlier suggestion (make feed favor *which* turns it buys on,
 by price, rather than changing its slot count) is a genuinely different
 family, still untried.
 
+A ninth attempt asked a different question first -- "how do real top
+players handle this?" -- instead of guessing another constant. Analyzed
+the 6 locally cached `top_ladder` replays: a player who recurs across 4
+of them (カワシギ, 4/4 wins) submits a feed BUY_PRODUCT order on only
+~12% of turns with live animals (this agent: near 100% of such turns
+before any fix), always as a *single* order, sized to refill toward
+roughly 1.0 WHEAT/animal (reverse-engineered from `shed_wheat / live` at
+decision time: median 0.17 when they buy, 0.56 when they don't -- see
+`feed_trigger_trace.py`, not checked in, built ad hoc for this). Tried the
+direct translation: halve `FEED_RESERVE_PER_ANIMAL` 2 -> 1 *and* replace
+the per-unit order loop with one consolidated `["BUY_PRODUCT", "WHEAT",
+needed]` order. This is a different combination than the fifth attempt's
+quantity cap (which kept the old reserve size, so it still fired nearly
+every turn just capped smaller) or the seventh/eighth (which touched
+slot count/position, not the reserve target).
+
+**Regressed the worst of all nine attempts: `tape_kiro` 63.3% -> 0.0%
+(0W-30L).** A same-seed replay pair showed animals did *not* starve
+(final live-animal count unchanged, 13 both runs) -- so this wasn't the
+catastrophic-starvation failure mode. It was the same standing-price
+mechanism again, worse than ever: mean implied WHEAT purchase price
+$20.85 -> $51.72 (2.5x). `--orders` explained why the smaller target
+didn't reduce trigger frequency the way the top player's own ~12% rate
+suggested it should: feed still fired on ~50% of turns, because
+`_build_sell_orders` dumps the *entire* shed the instant WHEAT clears its
+0.45x sell threshold, resetting `have` toward zero on every sell
+regardless of how small the reserve target is -- the trigger is reset by
+the sell side, not sized by the buy side. The slot-starvation symptom
+*did* genuinely resolve this time (saturated-turn frac fell from ~100% to
+4-12%, seed orders flowed normally) -- proving the mechanism is fixable
+this way -- but at a worse economic cost than the starvation itself.
+**Reverted** (never committed).
+
+This confirms, with real mechanism evidence rather than another guess:
+**no buy-side-only lever (order shape, slot position, reserve size, or
+any combination) can fix this without also touching the sell side**,
+because this agent's shed has no organic WHEAT buffer between harvest and
+sale to draw from the way the top player's apparently does -- and the
+sell side has already failed four separate times (three reserve sizes,
+one same-turn coordination) via the same standing-price mechanism when
+tried directly. The real gap with the top player isn't reserve sizing,
+order shape, or price thresholds (all now tried and ruled out) -- it's
+some other, still-unidentified difference in how they decide *when* to
+sell WHEAT at all, that lets enough of it accumulate for feed without
+this agent's version of that same idea blowing up the standing price.
+Nine attempts plus one threshold-sweep redo have now failed; the next one
+needs to explain that specific gap, not add another lever to either side
+of the sell/feed pair.
+
 Still out of scope: any opponent modeling -- this agent only ever reacts to
 its own farm/market state. See rl/README.md for the parallel (currently
 stalled) attempt at a learned policy. See this project's session memory for
@@ -1232,9 +1281,12 @@ def _build_feed_orders(farm, private, prices, money):
     delays a planting one turn, missing a feed loses the whole animal.
 
     Don't retry giving `_build_seed_orders` priority over this -- by a hard
-    per-turn cap on feed, or by reordering the list -- without new evidence.
-    See the module docstring's Market-order-slot starvation note, 7th and
-    8th attempts."""
+    per-turn cap on feed, by reordering the list, or by shrinking
+    `FEED_RESERVE_PER_ANIMAL`/consolidating into one order -- without new
+    evidence. See the module docstring's Market-order-slot starvation note,
+    7th/8th/9th attempts. Any buy-side-only lever hits the same wall: this
+    function's trigger gets reset by `_build_sell_orders` dumping the whole
+    shed on every sell, not sized by anything on the buy side."""
     live = _live_animal_count(farm)
     if live == 0:
         return []
