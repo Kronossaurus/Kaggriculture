@@ -396,6 +396,48 @@ Nine attempts plus one threshold-sweep redo have now failed; the next one
 needs to explain that specific gap, not add another lever to either side
 of the sell/feed pair.
 
+A tenth attempt tried exactly that gap directly instead of another buy-
+side lever: measured a recurring top-ladder player's WHEAT *selling*
+behavior (`sell_trigger_trace.py`, scratchpad) across their 4 cached
+replays and found only 54% of their WHEAT sells are a full shed dump --
+the rest hold something back, with price ratio at sale (min 1.08, median
+1.80) always above the 1.08 floor also seen on their hold turns (this
+matchup's WHEAT price apparently never drops much below base). Built
+`_build_sell_orders` a `wheat_reserve` parameter (held back from the dump
+unless crowded/liquidating -- the same shape as three already-reverted
+sell-side reserve attempts) but paired it with a raised
+`CROP_TARGET_SHARE["WHEAT"]`, on the reasoning that if the reserve comes
+out of *added* production instead of existing sell volume, the standing-
+price mechanism that killed those three attempts (less selling -> higher
+price) shouldn't trigger the same way.
+
+Tried two magnitudes, both against `tape_kiro` (30 seeds): a modest bump
+(WHEAT 0.25->0.30, MELON 0.45->0.40) scored 4W-26L (13.3%) -- better than
+the 7th/8th/9th attempts' 0-6.7%, but a same-seed trace showed why it
+still fell short: actual WHEAT *sell* volume dropped ~4-5x from baseline
+(the `wheat_reserve`, sized at `live * FEED_RESERVE_PER_ANIMAL = 2`, ate
+nearly all of the small extra production rather than coming out of
+genuinely added volume) and implied purchase price hit $84.72, the worst
+of any attempt. A much larger bump (WHEAT 0.25->0.45, MELON 0.45->0.25,
+to actually outrun the reserve) made it *worse*, not better: 1W-29L
+(3.3%). Escalating the production shift further is the wrong direction --
+**WHEAT is simply worth much less per tile than MELON** (see MELON's
+steep above-equilibrium price shape, Price-aware planting note above),
+so growing more of it to fund a feed reserve trades one loss (the
+standing-price regression) for a second, independent loss (a
+worse-value crop mix) that gets *larger*, not smaller, the harder this
+lever is pushed. **Reverted both magnitudes** (never committed).
+
+This rules out "compensate the reserve with more production" as a viable
+direction at all, regardless of magnitude -- not just the two sizes
+tried. Ten attempts plus one threshold-sweep redo have now failed. The
+top player's own partial-sell behavior (54% partial, price floor ~1.08x
+in this matchup) is still unreplicated, but the mechanism must be
+something that doesn't cost crop-mix value to achieve -- e.g. holding
+back WHEAT only when its *own* price is unusually low relative to its
+own recent range (not a fixed reserve size or a bigger target share),
+though this hasn't been tried and isn't assumed to work either.
+
 Still out of scope: any opponent modeling -- this agent only ever reacts to
 its own farm/market state. See rl/README.md for the parallel (currently
 stalled) attempt at a learned policy. See this project's session memory for
