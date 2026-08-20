@@ -107,6 +107,35 @@ sell, repeat) — a floor to beat, not a target design. Stronger play means reas
 expansion (`BUY_LAND`), hiring farm hands, higher-value/ongoing crops and animals, and timing
 sells against the dynamic market rather than dumping produce immediately.
 
+## Investigation methodology: revert vs. tune
+
+A win-rate regression in a 30-seed A/B is **not** by itself grounds to revert a fix — it
+gates Kaggle submission (don't submit a build that regresses the field), not whether the
+underlying code change survives in the repo. Before reverting anything that fixed a real,
+demonstrated bug (an accounting error, a livelock, a structural gap), root-cause the
+regression with a paired-seed replay trace (`scripts/analyze_replay.py --orders`/
+`--purchase-trace RESOURCE`, or a money-flow-by-resource trace like the ones in
+[[feed-orders-starve-market-slots]]'s 14th/17th-attempt notes) before deciding:
+
+- **Companion constant miscalibrated for the new behavior** (the fix changed some dynamic —
+  order volume, timing, crew allocation — that a fixed constant elsewhere was implicitly
+  tuned around) → re-tune that constant using the trace's own signal, not a blind guess, and
+  re-measure. Only give up on this path once a *specific* retuning hypothesis, motivated by
+  the trace, has actually been tried and failed — not on suspicion alone.
+- **Structural economic trade-off** (the fix genuinely reduces volume/revenue on something
+  that pays for a large share of the agent's economy, measured directly via the trace, the
+  way the 17th feed/seed-starvation attempt measured WHEAT throughput as +$35k of a $57k
+  final) → revert, but document the measured mechanism, not just the win/loss number.
+
+A fix that's mechanically validated (behaves as intended in a replay trace) but not yet
+tuned can sit on its own branch/commit while a tuning pass continues, rather than being
+reverted outright the moment the first A/B comes back worse — only promote to `main` (and
+therefore to Kaggle-submission eligibility) once the 30-seed A/B matches or beats baseline
+against the full pool *and* the two reactive self-play sentinels specifically (see
+[[feed-orders-starve-market-slots]] for why a non-reactive tape like `tape_kiro` alone is a
+biased, oversensitive signal for this kind of change — it rewards almost any reduction in
+this agent's own market activity, real improvement or not).
+
 ### RL training (`rl/`)
 
 Separate track from `main.py`, not shipped to Kaggle. `rl/env.py` wraps `kaggle_environments`'

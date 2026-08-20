@@ -195,6 +195,45 @@ def test_decide_unit_keeps_freshly_picked_up_wheat_below_the_threshold():
     assert action != ["DROP"]
 
 
+def test_decide_unit_sells_wheat_below_threshold_during_liquidation():
+    """See the module docstring's Endgame liquidation (WHEAT) note: without
+    `or liquidating`, a carried WHEAT batch below WHEAT_SHED_RETURN_THRESHOLD
+    (e.g. left over from a feed PICKUP) has no path to the shed and sits
+    stranded in unit inventory through game end -- unsold inventory doesn't
+    count toward final score. Mirrors the FERTILIZER liquidation test above."""
+    farm = _farm({})
+    planner = main._CropPlanner({"seeds": {}}, farm, days_remaining=1)
+    animal_planner = main._AnimalPlanner(farm, {}, {})
+    action = main._decide_unit(
+        pos=[0, 0], inv={"WHEAT": 4}, farm=farm, private={"shed": {}}, day=0, board_size=3,
+        claimed=set(), planner=planner, animal_planner=animal_planner, shed_tiles={(0, 0)},
+        want_fertilizer=False, liquidating=True, animal_zone=set(),
+        quadrant_util=_NEUTRAL_QUADRANT_UTIL, plant_priority=main.PLANT_PRIORITY,
+    )
+    assert action == ["DROP"]
+
+
+def test_decide_unit_keeps_wheat_during_liquidation_if_an_animal_still_needs_it():
+    """See the module docstring's Endgame liquidation (WHEAT) note, third
+    attempt: a first version dropped sub-threshold WHEAT during liquidation
+    unconditionally and measurably lost real money, because it let a unit
+    DROP feed WHEAT at the shed instead of walking it to a still-hungry
+    animal -- missing a feed this late loses the whole animal, a bigger
+    loss than a few unsold units. With an unfed animal on the farm, the
+    guard (`_any_unfed_animal`) must keep the WHEAT held even while
+    liquidating."""
+    farm = _farm({(2, 2): {"kind": "PASTURE", "animal": "COW", "fed_today": False, "cared_today": True}})
+    planner = main._CropPlanner({"seeds": {}}, farm, days_remaining=1)
+    animal_planner = main._AnimalPlanner(farm, {}, {})
+    action = main._decide_unit(
+        pos=[0, 0], inv={"WHEAT": 4}, farm=farm, private={"shed": {}}, day=0, board_size=3,
+        claimed=set(), planner=planner, animal_planner=animal_planner, shed_tiles={(0, 0)},
+        want_fertilizer=False, liquidating=True, animal_zone=set(),
+        quadrant_util=_NEUTRAL_QUADRANT_UTIL, plant_priority=main.PLANT_PRIORITY,
+    )
+    assert action != ["DROP"]
+
+
 def test_decide_unit_sells_fertilizer_during_liquidation_even_if_still_wanted():
     """See the module docstring's Endgame liquidation (fertilizer) note: a
     replay showed real, ongoing dollar value sitting in unit inventories
@@ -518,6 +557,54 @@ def test_find_target_shed_return_turns_urgent_above_the_carry_threshold():
         animal_zone=set(), quadrant_util=_NEUTRAL_QUADRANT_UTIL, plant_priority=main.PLANT_PRIORITY,
     )
     assert (target[0], target[1]) == (4, 4)  # cashes out instead
+
+
+def test_find_target_wheat_below_threshold_stays_held_outside_liquidation():
+    """Companion to the two tests above, but for WHEAT specifically -- see
+    the module docstring's Endgame liquidation (WHEAT) note. Mid-game, a
+    below-WHEAT_SHED_RETURN_THRESHOLD carried batch must NOT trigger a shed
+    trip (the PICKUP/DROP livelock guard from the Carried-stock accounting
+    note), so a nearby animal-care chore still wins."""
+    board_size = 5
+    tiles = [[None for _ in range(board_size)] for _ in range(board_size)]
+    tiles[0][1] = {"kind": "PASTURE", "animal": "COW", "fed_today": True, "cared_today": False}
+    farm = {"tiles": tiles, "hands": []}
+    animal_planner = main._AnimalPlanner(farm, {}, {})
+    small_wheat = {"WHEAT": main.WHEAT_SHED_RETURN_THRESHOLD - 1}
+    target = main._find_target(
+        pos=[0, 0], farm=farm, day=0, board_size=board_size, claimed=set(), inv=small_wheat,
+        planner=main._CropPlanner({"seeds": {}}, farm, days_remaining=20),
+        animal_planner=animal_planner, shed_tiles={(4, 4)},
+        want_fertilizer=False, shed_wheat_available=False, liquidating=False,
+        animal_zone=set(), quadrant_util=_NEUTRAL_QUADRANT_UTIL, plant_priority=main.PLANT_PRIORITY,
+    )
+    assert (target[0], target[1]) == (1, 0)  # cares for the nearby animal instead of walking home
+
+
+def test_find_target_wheat_below_threshold_still_stays_held_during_liquidation():
+    """Same setup, but liquidating: deliberately UNCHANGED (see the module
+    docstring's Endgame liquidation (WHEAT) note) -- a first attempt added
+    `or liquidating` here too and it measurably regressed real money (15-seed
+    pool A/B 59.3%->49.6%, our own money down even in matchups where the win
+    count didn't move), because it dedicates a high-priority trip for nearly
+    every unit's small stray WHEAT during the final days, crowding out
+    higher-value harvesting/feeding. `_decide_unit`'s DROP gate still gets
+    the liquidating escape (see the test below) so it's dropped opportunistically
+    when a unit is at the shed for another reason -- just never a dedicated trip."""
+    board_size = 5
+    tiles = [[None for _ in range(board_size)] for _ in range(board_size)]
+    tiles[0][1] = {"kind": "PASTURE", "animal": "COW", "fed_today": True, "cared_today": False}
+    farm = {"tiles": tiles, "hands": []}
+    animal_planner = main._AnimalPlanner(farm, {}, {})
+    small_wheat = {"WHEAT": main.WHEAT_SHED_RETURN_THRESHOLD - 1}
+    target = main._find_target(
+        pos=[0, 0], farm=farm, day=0, board_size=board_size, claimed=set(), inv=small_wheat,
+        planner=main._CropPlanner({"seeds": {}}, farm, days_remaining=1),
+        animal_planner=animal_planner, shed_tiles={(4, 4)},
+        want_fertilizer=False, shed_wheat_available=False, liquidating=True,
+        animal_zone=set(), quadrant_util=_NEUTRAL_QUADRANT_UTIL, plant_priority=main.PLANT_PRIORITY,
+    )
+    assert (target[0], target[1]) == (1, 0)  # still no dedicated trip -- cares for the animal instead
 
 
 def test_find_target_prioritizes_a_tile_about_to_become_a_weed():

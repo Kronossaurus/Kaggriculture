@@ -137,10 +137,59 @@ specifically also stops being re-fetched once liquidating and instead counts
 as sellable "produce" -- a unit was otherwise still walking to fetch more
 fertilizer for a crop with no season left to benefit from it. WHEAT's feed
 reserve is deliberately exempted from this -- missing a feed this late still
-loses the whole animal, a bigger loss than the travel time saved. (WHEAT
-itself is *not* currently exempted from the general "never counts as
-carried produce worth returning" exclusion even during liquidation, unlike
-FERTILIZER -- a real, still-open gap, see the next-steps memory.)
+loses the whole animal, a bigger loss than the travel time saved.
+
+**Endgame liquidation (WHEAT)**: a carried WHEAT batch below
+`WHEAT_SHED_RETURN_THRESHOLD` normally stays held (see the Carried-stock
+accounting note's PICKUP/DROP livelock guard) since a dedicated trip for a
+small batch isn't worth it mid-game. First attempt: added `or liquidating`
+to both `_find_target`'s `returning_wheat` trigger and `_decide_unit`'s
+carried-produce DROP gate, mirroring FERTILIZER's own liquidation escape
+exactly. Mechanically it worked (a same-seed trace vs. `tape_kiro` dropped
+stranded end-of-game WHEAT 37->24 units, shed WHEAT 9->0), but a 15-seed
+pool A/B (default pool + both reactive sentinels + `tape_kiro`/
+`tape_kawashigi`) regressed real money in nearly every matchup (pool total
+59.3%->49.6%) including several 100%-win-rate ones where the win count
+didn't move. Root-caused with a per-resource money-flow trace (same
+technique as the 14th/17th feed/seed-starvation attempts): `tape_kiro`'s
+own realized trade flow only shifted +$1,282 (a small MILK/WOOL
+crew-attention echo), while *our own* money alone dropped $3,257 on the
+same seed -- not a shared-price effect, a direct opportunity cost.
+`_find_target`'s `returning_wheat` trigger shares `shed_priority` with
+FERTILIZER's liquidation return (tuned for FERTILIZER's rarer, larger
+batches); routine feed PICKUPs leave nearly every unit holding some stray
+sub-threshold WHEAT constantly, so extending the trigger to WHEAT fired a
+dedicated high-priority trip far more often than FERTILIZER ever does,
+crowding out higher-value final-day harvesting/feeding for a net loss
+larger than the WHEAT recovered.
+
+**Second attempt, narrower: still regressed, identically.** `_find_target`'s
+`returning_wheat` trigger reverted to threshold-only (no `liquidating`
+clause -- never a dedicated trip for a small batch, matching the
+established "piggyback, don't dedicate a trip" shape from the 12th
+attempt's own note); only `_decide_unit`'s DROP gate kept `or liquidating`.
+The same seed-42-vs-`tape_kiro` replay was byte-identical to the first
+attempt's (same 24 units stranded, same final money to the dollar) --
+proving `_find_target`'s trigger was never the mechanism on that seed at
+all -- and the 15-seed pool A/B landed on the *same* 49.6% total. The real
+cause was the DROP gate itself: `_decide_unit` checks `carried_produce`
+(DROP) before the WHEAT-PICKUP-for-feed branch, and the liquidating escape
+didn't check whether an animal still needed that WHEAT -- so a unit
+standing at the shed already carrying feed WHEAT for a still-hungry animal
+would DROP it there instead of walking it to the animal, directly risking
+the exact loss ("missing a feed this late still loses the whole animal")
+the pre-existing code's own `needs_wheat` design had always protected
+against everywhere else.
+
+**Third attempt: added the missing feed-need guard, kept.** New helper
+`_any_unfed_animal(farm)` (mirrors `_any_fertilizable`); the DROP gate's
+WHEAT clause is now `n >= WHEAT_SHED_RETURN_THRESHOLD or (liquidating and
+not _any_unfed_animal(farm))` (`_decide_unit`'s own `wheat_safe_to_liquidate`
+local). Endgame-only (last `ENDGAME_LIQUIDATION_DAYS=2` days) and now
+requires the standard 15-seed pool A/B (default pool + both reactive
+sentinels + `tape_kiro`/`tape_kawashigi`) to match or beat the 59.3%
+baseline before being trusted -- the two prior shapes are both confirmed
+regressed and must not be reapplied without this guard.
 
 **Neglected-tile urgency**: a tile that missed watering once
 (`consecutive_unwatered >= 1` -- two consecutive misses turns a PLANT into a
@@ -1152,6 +1201,14 @@ def _any_fertilizable(farm, day):
     return any(_is_fertilizable(tile, day) for row in farm["tiles"] for tile in row)
 
 
+def _any_unfed_animal(farm):
+    """Mirrors `_any_fertilizable` -- used to gate the WHEAT endgame-liquidation DROP escape
+    (see `_decide_unit`'s carried_produce and the module docstring's Endgame liquidation
+    (WHEAT) note) so it never drops WHEAT an unfed animal could still use, even this late:
+    missing a feed loses the whole animal, a bigger loss than a few dollars of unsold grain."""
+    return any(_is_animal_tile(tile) and not tile.get("fed_today") for row in farm["tiles"] for tile in row)
+
+
 def _is_harvestable(tile, day):
     """yield_units > 0 alone is NOT "ready" for one-time crops: `_new_plant`
     seeds it at 1 immediately on planting (kaggriculture.py), but HARVEST is
@@ -1517,6 +1574,13 @@ def _find_target(
     # partial harvest) and always at routine shed_priority, never urgent, avoids both
     # failure modes: small/frequent carries generate no trip at all, and even a big one
     # never outranks weeding/watering.
+    # Deliberately NOT extended with `or liquidating` for a below-threshold batch: measured (see
+    # the module docstring's Endgame liquidation (WHEAT) note) -- a dedicated trip here reuses
+    # `shed_priority`, tuned for FERTILIZER's rarer, larger liquidation returns, and firing it for
+    # nearly every unit's small stray WHEAT (routine feed PICKUPs leave sub-threshold leftovers
+    # constantly) crowded out higher-value final-day work for a net loss. `_decide_unit`'s DROP
+    # gate still gets the liquidating escape below, so a unit already at the shed for another
+    # reason still drops it -- just never a trip dedicated to it alone.
     returning_wheat = inv.get("WHEAT", 0) >= WHEAT_SHED_RETURN_THRESHOLD
     if carrying_produce or needs_fertilizer or needs_wheat or needs_animal_pickup or returning_wheat:
         if needs_wheat:
@@ -1587,11 +1651,12 @@ def _decide_unit(
             claimed.add((fx, fy))
             item, n = next(iter(carried_product.items()))
             return ["PLACE", item, n]
+        wheat_safe_to_liquidate = liquidating and not _any_unfed_animal(farm)
         carried_produce = {
             k: n for k, n in inv.items()
             if n > 0 and k not in ANIMAL_KINDS
             and (k != "FERTILIZER" or not want_fertilizer or liquidating)
-            and (k != "WHEAT" or n >= WHEAT_SHED_RETURN_THRESHOLD)
+            and (k != "WHEAT" or n >= WHEAT_SHED_RETURN_THRESHOLD or wheat_safe_to_liquidate)
         }
         # WHEAT is included here (unlike _find_target's carried_produce_total above), but
         # gated at the same WHEAT_SHED_RETURN_THRESHOLD -- without this, a unit that just
@@ -1603,6 +1668,14 @@ def _decide_unit(
         # yet extended to WHEAT. Threshold must exceed PICKUP's own 4-unit cap for the guard
         # to actually work -- this was the real bug behind the 11th/12th attempts' weed-count
         # explosion, not the trip-generation concern _find_target's own gate addresses.
+        # `wheat_safe_to_liquidate` mirrors FERTILIZER's own liquidation escape, but -- unlike
+        # FERTILIZER -- ALSO requires no animal is still unfed: a first version used bare
+        # `liquidating` and measurably regressed (15-seed pool A/B, real money down almost
+        # everywhere) because it let a unit DROP its already-carried feed WHEAT instead of
+        # walking it to a hungry animal, exactly the mistake `needs_wheat`'s own lack of a
+        # `not liquidating` clause was written to avoid -- missing a feed this late still loses
+        # the whole animal, a bigger loss than a few unsold units. See the module docstring's
+        # Endgame liquidation (WHEAT) note for the full history.
         if carried_produce:
             claimed.add((fx, fy))
             return ["DROP"]
