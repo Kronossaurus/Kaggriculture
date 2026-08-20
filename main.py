@@ -2107,8 +2107,63 @@ def _build_animal_orders(farm, private, money):
     correctly against stranding costs more throughput than the stranding
     itself -- reverted rather than ship an unexplained regression chasing
     a bug worth an estimated ~$1,900/game (small next to the 20-50%
-    swings the fix attempts caused). Worth another look with a clearer
-    hypothesis before retrying."""
+    swings the fix attempts caused).
+
+    **Third attempt (2026-08-20), a clearer hypothesis, and a clearer
+    root cause for why fixing it costs more than it saves.** Bulk
+    instrumentation across 50 games (main.py vs a 5-opponent pool, via
+    the fast C++ engine -- see cpp_sim/README.md) measured ~$59,300/50
+    games (~$1,186/game) of animals bought and never placed -- close to
+    the earlier single-replay estimate, and this time with a specific,
+    previously-unnoticed mechanism: `committed` here counts shed tokens
+    + live animals, but never a token a unit is *currently carrying*
+    (picked up from the shed, en route to an empty structure) --
+    invisible to this gate for however many turns the trip takes, during
+    which a purchase can land that the true state didn't need. Traced
+    directly on a stuck-animal replay: 88% of stranded-token turns had
+    zero empty structures at all (buying outran a target that was, by
+    then, already fully built), only 12% coincided with an actually-free
+    structure sitting unused -- explaining why the first two attempts
+    (which gated on structure availability, something that's almost
+    never free anyway) choked off purchasing almost entirely instead of
+    trimming just the excess.
+
+    Adding carried tokens to `committed` fixed the measured bug cleanly
+    (COW 62->3, SHEEP 69->0 stranded units across the same 50 games, a
+    ~98% cut) but **still net-regressed a full 30-seed x `DEFAULT_POOL`
+    A/B**: 71.9%->67.6% win rate (151W-59L -> 142W-68L), entirely
+    concentrated in the two reactive self-play snapshots
+    (`main_plant_priority_submitted_20260818.py`,
+    `main_price_reactive_seed_reserve_submitted_20260819.py`) -- the
+    other 5 opponents (including x492) showed zero flips either
+    direction. Root-caused via a paired replay trace (seed 18 vs
+    plant_priority, the single largest swing): live-animal count, FEED
+    actions, and WHEAT produced/sold were all within noise between
+    baseline and the fix (refuting the first guess that more successfully
+    -placed animals means more feed competing with WHEAT sales) -- the
+    real mechanism was `n_quadrants`: baseline stayed at 3, the fix
+    reached 4. Buying fewer excess animals leaves more spare cash
+    sloshing around, which `_build_land_orders`' own gate (`money -
+    SAFETY_RESERVE >= LAND_PRICES[n_extra]`, no other limit once
+    `_land_utilization >= LAND_UTILIZATION_GATE`) crosses more often --
+    the "4th quadrant dilutes the same crew across more land" cost from
+    the module docstring's Land / hands note, which `_land_worth_buying`
+    claims the current hire formula "stops blocking... in practice," but
+    empirically still nets a real loss when it fires. Checked across all
+    15 flipped seeds: 6/15 show this exact `n_quadrants` 3->4 pattern:
+    the other 9/15 flip without any land-purchase difference, so this is
+    only part of the mechanism -- the fix shifts this agent's whole
+    cash-flow timing (hiring, seed-buying, fertilizer-buying are all
+    gated on spare money too), and this project's own history (the
+    SEED_RESERVE doubling catastrophe, the whole feed-orders-starve-
+    market-slots saga) shows this economy is unusually sensitive to
+    exactly that kind of shift. Reverted a third time -- the underlying
+    stranding bug and its now-precise mechanism are real and worth
+    fixing, but not by this route alone; a future attempt should pair
+    the carried-inventory fix with a tightened land-purchase gate (or
+    otherwise re-examine every other money-gated decision for the same
+    freed-cash sensitivity) rather than assume the animal-purchase fix
+    is safe in isolation."""
     orders = []
     shed = private.get("shed", {})
     target = _animal_target(farm)

@@ -80,6 +80,15 @@ PARAM_SPACE = {
     "PRICE_ATTRACTIVENESS_WEIGHT": ("float", 0.0, 0.3),
     "WHEAT_SELL_THRESHOLD": ("float", 0.45, 2.0),
     "FEED_MAX_PRICE_FRAC": ("float", 1.0, 5.0),
+    # Added 2026-08-20 after the first 7-param sweep found nothing that beat
+    # baseline on the full pool (see the next-steps-2026-08-19 memory note's
+    # item 1) -- these three are, like the pair above, cash-timing/threshold
+    # knobs rather than land/crop/animal ownership, so the same "fair game"
+    # reasoning applies. Bounds centered on main.py's current value with
+    # headroom both directions, not blind ranges.
+    "SAFETY_RESERVE": ("int", 0, 800),  # main.py: 300
+    "FERTILIZER_MAX_PRICE_FRAC": ("float", 1.05, 2.0),  # main.py: 1.2
+    "SHED_OVERFLOW_GUARD": ("float", 0.6, 0.95),  # main.py: 0.85
 }
 
 # WHEAT_SELL_THRESHOLD isn't a top-level `NAME = value` constant -- it's
