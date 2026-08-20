@@ -642,6 +642,56 @@ still freeing the WHEAT/seed slots, e.g. by not letting the crop-side
 recovery come at animal husbandry's expense in the crew's own priority
 ordering, rather than another variant of the order-slot mechanism itself.
 
+**A fifteenth attempt did exactly what the fourteenth's note asked for --
+reapplied its consolidation paired with an animal-care priority floor meant
+to hold MILK/WOOL/FERTILIZER supply steady -- and confirmed the pairing
+still isn't enough, but split cleanly into a real, if narrow, keeper.**
+Traced the actual mechanism first: `_find_target`'s COLLECT_FERTILIZER/CARE
+candidates sorted at a flat priority 3, comfortably below `PLANT_PRIORITY`
+(4) but strictly above `PLANT_PRIORITY_UNDER_GATE` (1.5) -- so once the 14th
+attempt's fix let seed orders flow again, a fresh PLANT candidate under the
+gate started systematically outranking animal upkeep instead of losing to
+it (previously animal upkeep always won there, 3 < 4), quietly diverting
+crew-turns off husbandry toward planting. Added `animal_upkeep_priority =
+min(3, plant_priority)`: ties animal upkeep with PLANT under the gate
+(distance breaks the tie) while leaving it untouched (still 3) outside the
+gate, where it already won.
+
+Reapplied the 14th's exact consolidated `_build_feed_orders` (one order
+capped at `MAX_MARKET_ORDERS - slots_used_so_far`) alongside this floor and
+validated the combination: `tape_kiro` still 0W-30L, pool still 53.8%
+(113W-97L) -- statistically the same as the 14th attempt's unpaired 54.8%,
+no rescue. But isolating the two halves (each vs. the full 30-seed pool)
+told a clearer story than testing them only combined would have: the feed
+consolidation *alone* reproduced the 14th attempt's number bit-for-bit
+(115W-95L, 54.8%, confirming the reconstruction was faithful), while the
+*priority floor alone* -- with `_build_feed_orders` left at its original
+per-unit form -- scored 148W-62L (70.5%), matching baseline (69.5%) within
+noise and regressing nowhere (also checked against both real-tape
+sentinels: `tape_kiro` 60.0% vs. baseline's 63.3%, within noise;
+`tape_kawashigi` 0W-30L identical to the clean baseline's own 0W-30L on
+that sentinel -- a pre-existing, unrelated hard matchup, not a new
+regression). **The priority floor carries its own weight even without the
+feed fix** (most of its benefit comes from the land-utilization gate being
+active more than the 14th attempt's note assumed -- e.g. right after a land
+purchase, per the 14th attempt's own utilization trace), **but the feed
+consolidation's regression is exactly as large paired as unpaired**,
+meaning the animal-market-spillover mechanism isn't primarily a crew-
+priority effect at all, or at least not one this particular floor reaches.
+**Kept the priority floor alone** (reverted `_build_feed_orders` back to
+the original per-unit-order form) as a small, validated, genuine
+correctness improvement -- same category as the 12th attempt.
+
+Fifteen attempts across four sessions plus one threshold-sweep redo: two
+kept (12th, 15th) as narrow correctness fixes, neither addressing the
+starvation symptom itself; the rest reverted. The feed/seed-slot mechanism
+remains solved in principle (14th attempt's consolidation shape) but
+un-shippable alone; a sixteenth attempt still needs to explain the animal-
+market spillover through some other mechanism than crew-priority
+starvation -- e.g. whether it's really about *money* (the freed seed
+spending competing with feed/animal-purchase cash under `SAFETY_RESERVE`,
+not crew-turns) rather than *attention*.
+
 Still out of scope: any opponent modeling -- this agent only ever reacts to
 its own farm/market state. See rl/README.md for the parallel (currently
 stalled) attempt at a learned policy. See this project's session memory for
@@ -1181,6 +1231,17 @@ def _find_target(
     fx, fy = pos
     water_priority = 5 if liquidating else 1
     shed_priority = 1 if liquidating else 5
+    # 15th market-order-slot-starvation attempt: collect-fertilizer/care used to sort at a
+    # flat 3, comfortably below PLANT_PRIORITY (4) but strictly above PLANT_PRIORITY_UNDER_GATE
+    # (1.5) -- so once the 14th attempt's feed-order fix let seed orders flow again, a fresh
+    # PLANT candidate under the gate started systematically outranking animal upkeep instead of
+    # losing to it, quietly pulling crew-turns off COLLECT_FERTILIZER/CARE toward planting. That
+    # crew-time diversion is the mechanism traced behind the 14th attempt's MILK/WOOL/FERTILIZER
+    # price spillover -- see the module docstring. Flooring animal upkeep's own priority at
+    # plant_priority keeps it tied (broken by distance) with PLANT under the gate instead of
+    # losing outright, while leaving it untouched (still 3, still below PLANT_PRIORITY's 4) once
+    # the gate isn't active -- matching the pre-14th baseline exactly in the ungated regime.
+    animal_upkeep_priority = min(3, plant_priority)
     spread_penalty = board_size // 2  # scale of the quadrant-balance nudge, in tiles
     candidates = []
     any_unfed = False
@@ -1213,9 +1274,9 @@ def _find_target(
                                                                # anything; 2 misses = the
                                                                # animal escapes
                 elif tile.get("fertilizer_available"):
-                    candidates.append((x, y, 3, dist))  # collect fertilizer
+                    candidates.append((x, y, animal_upkeep_priority, dist))  # collect fertilizer
                 elif not tile.get("cared_today"):
-                    candidates.append((x, y, 3, dist))  # care (free next-yield bonus)
+                    candidates.append((x, y, animal_upkeep_priority, dist))  # care (free next-yield bonus)
             elif _is_empty_structure(tile) and _carried_animal_for(tile, inv):
                 candidates.append((x, y, 0, dist))  # place a carried animal -- don't leave it idle
             elif tile is None:
@@ -1561,7 +1622,14 @@ def _build_feed_orders(farm, private, prices, money):
     evidence. See the module docstring's Market-order-slot starvation note,
     7th/8th/9th attempts. Any buy-side-only lever hits the same wall: this
     function's trigger gets reset by `_build_sell_orders` dumping the whole
-    shed on every sell, not sized by anything on the buy side."""
+    shed on every sell, not sized by anything on the buy side. The 15th
+    attempt re-tried the 14th's volume-preserving consolidation here, this
+    time paired with an animal-care priority floor (see _find_target's
+    `animal_upkeep_priority`) meant to hold this agent's own MILK/WOOL/
+    FERTILIZER supply steady -- the floor alone is kept (see the module
+    docstring), but consolidating this function specifically still
+    regressed exactly as before even paired with it, so this function
+    itself is back to the original per-unit form."""
     live = _live_animal_count(farm)
     if live == 0:
         return []

@@ -531,6 +531,58 @@ def test_find_target_plant_priority_beats_weeding_under_the_gate():
     assert target[2] == main.PLANT_PRIORITY_UNDER_GATE  # a nearby empty tile, not the distant weed
 
 
+def test_find_target_animal_upkeep_ties_plant_priority_under_the_gate():
+    """15th market-order-slot-starvation attempt: before this fix, animal
+    upkeep (collect-fertilizer/care) sorted at a flat 3, so once seed
+    orders flow again (the 14th attempt) a fresh PLANT_PRIORITY_UNDER_GATE
+    (1.5) candidate would win outright regardless of distance, quietly
+    diverting crew-turns off animal husbandry -- the traced mechanism
+    behind the 14th attempt's MILK/WOOL/FERTILIZER price spillover (see
+    the module docstring). Flooring animal upkeep at plant_priority under
+    the gate ties them, so distance decides: a close animal-care tile
+    should now win over a farther empty tile."""
+    board_size = 5
+    tiles = [[None for _ in range(board_size)] for _ in range(board_size)]
+    tiles[0][0] = "LOCKED"  # the unit's own tile: not itself a competing plant candidate
+    tiles[0][1] = {"kind": "PASTURE", "animal": "COW", "fed_today": True,
+                    "fertilizer_available": False, "cared_today": False}  # close: (1, 0), dist=1
+    tiles[4][4] = None  # far empty/plantable tile: (4, 4), dist=8
+    farm = {"tiles": tiles, "hands": []}
+    private = {"seeds": {"WHEAT": 5}}
+    planner = main._CropPlanner(private, farm, days_remaining=20)
+    animal_planner = main._AnimalPlanner(farm, {}, {})
+    target = main._find_target(
+        pos=[0, 0], farm=farm, day=0, board_size=board_size, claimed=set(), inv={},
+        planner=planner, animal_planner=animal_planner, shed_tiles=set(),
+        want_fertilizer=False, shed_wheat_available=False, liquidating=False,
+        animal_zone=set(), quadrant_util=_NEUTRAL_QUADRANT_UTIL,
+        plant_priority=main.PLANT_PRIORITY_UNDER_GATE,
+    )
+    assert (target[0], target[1]) == (1, 0)  # the close animal-care tile wins the tie
+
+
+def test_find_target_animal_upkeep_priority_unchanged_at_baseline():
+    """Outside the gate (plant_priority=PLANT_PRIORITY=4), animal upkeep
+    must still sort at its original 3 -- min(3, 4) == 3 -- matching the
+    pre-15th-attempt baseline exactly, since PLANT_PRIORITY (4) already
+    lost to animal upkeep (3) before this fix."""
+    board_size = 5
+    tiles = [[None for _ in range(board_size)] for _ in range(board_size)]
+    tiles[0][1] = {"kind": "PASTURE", "animal": "COW", "fed_today": True,
+                    "fertilizer_available": False, "cared_today": False}  # dist=1
+    farm = {"tiles": tiles, "hands": []}
+    private = {"seeds": {}}
+    planner = main._CropPlanner(private, farm, days_remaining=20)
+    animal_planner = main._AnimalPlanner(farm, {}, {})
+    target = main._find_target(
+        pos=[0, 0], farm=farm, day=0, board_size=board_size, claimed=set(), inv={},
+        planner=planner, animal_planner=animal_planner, shed_tiles=set(),
+        want_fertilizer=False, shed_wheat_available=False, liquidating=False,
+        animal_zone=set(), quadrant_util=_NEUTRAL_QUADRANT_UTIL, plant_priority=main.PLANT_PRIORITY,
+    )
+    assert target[2] == 3
+
+
 def test_land_utilization_selects_boosted_plant_priority_below_the_gate():
     """Locks agent()'s own selection logic (see the module docstring's
     Planting priority under the gate note) via the shared _land_utilization
