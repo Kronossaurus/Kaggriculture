@@ -331,6 +331,23 @@ def test_build_feed_orders_skipped_when_reserve_already_met():
     assert main._build_feed_orders(farm, private, prices, money=10000.0) == []
 
 
+def test_build_feed_orders_deliberately_ignores_wheat_carried_by_units():
+    """Locks the *reverted* 17th attempt (see the module docstring's
+    Carried-stock accounting note). Counting carried WHEAT toward the
+    reserve is the obviously correct accounting -- `_build_fertilizer_
+    orders` already does exactly that -- and it fixes the market-order-slot
+    starvation outright, but it also cuts WHEAT sales 70% along with the
+    purchases, and WHEAT throughput is this agent's largest profit centre
+    (net +$35k of a $57k final). Measured cost: reactive sentinels 51.7% ->
+    3.3%, full pool 71.9% -> 57.6%. This test exists so the "fix" isn't
+    re-applied as an obvious cleanup without reading why it's not one."""
+    farm = _farm({(0, 0): _animal_tile()})  # 1 animal -> reserve = 2
+    private = {"shed": {"WHEAT": 0}, "inventories": [{"WHEAT": 3}]}
+    prices = {"WHEAT": 25}
+    orders = main._build_feed_orders(farm, private, prices, money=10000.0)
+    assert orders == [["BUY_PRODUCT", "WHEAT", 1], ["BUY_PRODUCT", "WHEAT", 1]]
+
+
 def test_build_seed_orders_scales_reserve_up_with_an_attractive_price():
     """Locks the price-reactive seed reserve fix (see the module
     docstring's Price-reactive seed reserve note): a crop trading at

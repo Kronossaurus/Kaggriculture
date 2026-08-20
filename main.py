@@ -819,6 +819,70 @@ two reactive self-play sentinels and the full pool, not `tape_kiro` alone
 (now confirmed to reward almost any reduction in this agent's own
 spending activity, real quality improvement or not).**
 
+**Carried-stock accounting note (17th attempt, reverted -- but it finally
+explains WHY every attempt in this file fails, which none of the sixteen
+did).** The user reported the symptom from the visualizer as "once the
+pastures are consolidated we can't plant seeds any more", and it is exactly
+datable: in `replays/vs_kawashigi.json` the last animal structure goes up on
+day 13-14, and from that turn on market slots sit at 10/10 with ~8.4 of them
+`BUY_PRODUCT WHEAT`, `BUY_SEED` is flat 0.00 for 16 straight days, seeds hit
+0 and stay there, and planted tiles fall 20.7 -> 2.0 while 60 of 75 owned
+tiles sit empty. Money was never the constraint ($7k day 16, $47k day 29).
+The trigger is the animal count reaching `_animal_target`, since `reserve =
+live * FEED_RESERVE_PER_ANIMAL` scales with it.
+
+A real accounting bug sits underneath: the reserve is compared against
+`private["shed"]["WHEAT"]` only, while feed WHEAT is consumed from *unit
+inventories* and therefore mostly sits there. Day 14 onward: reserve 24,
+shed 9.8, carried 26.1 -- 35.9 actually owned, 50% past target, still
+requesting ~15 units/turn. One day-16 turn reads `SELL WHEAT 9` then nine
+`BUY_PRODUCT WHEAT 1` in the same order list; ~200 WHEAT/day churned to feed
+12 animals that eat 12/day. `_build_fertilizer_orders` has always summed
+shed + inventories correctly; the pattern was simply never applied to WHEAT.
+
+Fixed the obvious way (`have = shed + carried`). **Mechanically it worked
+better than any of the sixteen**: feed demand 15.0 -> 2.2 orders/turn (-84%,
+vs. the top-ladder player's own 0.12), saturated turns 100% -> 12-21%, seeds
+held 15-17 instead of 0, planted tiles sustained 20-33 through day 27
+instead of collapsing to 2, animals unharmed (13 live, up from 12), and the
+**4th quadrant unlocked** -- the concrete signal earlier notes here define
+as proof the bug finally gave. **And it lost, hard**: vs. the two reactive
+self-play sentinels, 31W-29L (51.7%) -> 2W-58L (3.3%); full 30-seed pool
+151W-59L (71.9%) -> 121W-89L (57.6%), with mean money down in *every*
+matchup including the 30-0 wins.
+
+Two "the constants were tuned around the bug" pairings were then tested and
+both failed, which is what makes this conclusive rather than another
+inconclusive revert: `PLANT_PRIORITY_UNDER_GATE` 1.5 -> 2.5 (planting under
+the gate outranks weed-clearing at 2, and `_land_utilization` doesn't count
+weeds as used land, so restored seed supply drives a self-feeding weed cycle
+-- weeds really did explode 1-3 -> 14-21 of 100 tiles) scored 4W-56L (6.7%);
+`MAX_HANDS` 12 -> 14 (at 4 quadrants `_hands_target` is capped at 12, so
+land grows 33% for 9% more crew -- and the raise is inert for the baseline,
+which never buys the 4th quadrant) scored 1W-59L (1.7%), *worse* than
+unpaired.
+
+**The mechanism, measured directly rather than inferred**: per-resource
+realized flows on a traced sentinel game show WHEAT market throughput is
+this agent's largest profit centre by far -- gross sell $227,030 (4,652u)
+against gross buy $191,822 (3,945u), **net +$35,208 of a $56,699 final**,
+more than MILK ($40,085 gross), MELON, WOOL and FERTILIZER combined. That
+throughput flows *through* the over-buying: cutting feed purchases 84% cut
+WHEAT sales 70% with them (gross sell $65,598, net +$23,363), and the extra
+crops the freed slots bought back (CARROT +27u, STRAWBERRY +7u, MELON -15u)
+are worth a few thousand against ~$12k of lost WHEAT margin.
+
+**So the accounting bug is load-bearing.** This reframes all sixteen prior
+attempts: they didn't fail to a subtle "standing price" effect, they failed
+because freeing WHEAT/seed market slots necessarily shrinks the WHEAT flow
+that pays for most of the farm. An 18th attempt must not start by reducing
+WHEAT throughput. The only shapes worth trying are ones that *keep* the
+volume while spending fewer slots on it -- and the 14th attempt's
+volume-preserving consolidation is exactly that shape and still scored 54.8%
+-- or ones that first build a replacement revenue stream big enough to
+outweigh ~60% of final money, before touching feed at all. Reverted; this
+note and `_build_feed_orders`'s own are the whole deliverable.
+
 Still out of scope: any opponent modeling -- this agent only ever reacts to
 its own farm/market state. See rl/README.md for the parallel (currently
 stalled) attempt at a learned policy. See this project's session memory for
@@ -1848,16 +1912,27 @@ def _build_feed_orders(farm, private, prices, money):
     per-turn cap on feed, by reordering the list, or by shrinking
     `FEED_RESERVE_PER_ANIMAL`/consolidating into one order -- without new
     evidence. See the module docstring's Market-order-slot starvation note,
-    7th/8th/9th attempts. Any buy-side-only lever hits the same wall: this
-    function's trigger gets reset by `_build_sell_orders` dumping the whole
-    shed on every sell, not sized by anything on the buy side. The 15th
-    attempt re-tried the 14th's volume-preserving consolidation here, this
-    time paired with an animal-care priority floor (see _find_target's
-    `animal_upkeep_priority`) meant to hold this agent's own MILK/WOOL/
-    FERTILIZER supply steady -- the floor alone is kept (see the module
-    docstring), but consolidating this function specifically still
-    regressed exactly as before even paired with it, so this function
-    itself is back to the original per-unit form."""
+    7th/8th/9th attempts. The 15th attempt re-tried the 14th's
+    volume-preserving consolidation here, this time paired with an
+    animal-care priority floor (see _find_target's `animal_upkeep_priority`)
+    meant to hold this agent's own MILK/WOOL/FERTILIZER supply steady -- the
+    floor alone is kept (see the module docstring), but consolidating this
+    function specifically still regressed exactly as before even paired with
+    it, so this function itself stays in the original per-unit form.
+
+    **`have` deliberately counts only the shed, even though that double-buys
+    WHEAT the farm already owns (17th attempt, reverted).** Feed WHEAT is
+    consumed out of a *unit's* inventory (`FEED` reads `inv["WHEAT"]`;
+    `_decide_unit` PICKUPs up to 4 at a time), so that's where it piles up,
+    invisible here -- unlike `_build_fertilizer_orders`, whose own `have`
+    correctly sums shed + `private["inventories"]`. Summing them here too
+    was tried and measured; it works mechanically and loses badly anyway.
+    See the module docstring's Carried-stock accounting note for the full
+    numbers. Short version: WHEAT market throughput is this agent's single
+    largest profit centre (net +$35k of a $57k final on a traced game, more
+    than animals and every other crop combined), and it flows *through* this
+    over-buying -- cutting feed purchases 84% cut WHEAT sales 70% with them.
+    Don't "fix" this without a plan for replacing that revenue."""
     live = _live_animal_count(farm)
     if live == 0:
         return []
