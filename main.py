@@ -686,11 +686,88 @@ Fifteen attempts across four sessions plus one threshold-sweep redo: two
 kept (12th, 15th) as narrow correctness fixes, neither addressing the
 starvation symptom itself; the rest reverted. The feed/seed-slot mechanism
 remains solved in principle (14th attempt's consolidation shape) but
-un-shippable alone; a sixteenth attempt still needs to explain the animal-
-market spillover through some other mechanism than crew-priority
-starvation -- e.g. whether it's really about *money* (the freed seed
-spending competing with feed/animal-purchase cash under `SAFETY_RESERVE`,
-not crew-turns) rather than *attention*.
+un-shippable alone.
+
+**Same-turn cash competition note (16th attempt): the money hypothesis
+from the 15th's own next-step note was real, but fixing it correctly
+still didn't rescue the 14th's consolidation -- a third independent
+rescue mechanism, a third failure, but a real correctness fix survives
+on its own.** Read kaggriculture.py's actual `_process_market`/
+`_commit_unit` directly instead of guessing: market orders are NOT each
+checked against a static per-turn money snapshot -- the engine processes
+the whole submitted queue in a per-unit lockstep loop, checking `farm
+["money"] < price` at every individual unit commit, live, in submitted
+order-list order. Since `agent()`'s own list is sell/land/hire/feed/
+seed/fertilizer/animal, and every `_build_*_orders` function independently
+checked the SAME raw `farm["money"]` snapshot with no idea what earlier
+orders in the same list already committed to spend, `_build_animal_orders`
+(last in the list) could request a purchase it genuinely believed was
+affordable, only for the engine to silently reject it once feed/seed/
+fertilizer had already drawn the balance down first.
+
+Added `_orders_cash_cost` (estimates an order list's dollar cost using
+the same per-item price basis each builder already uses for its own
+affordability math) and threaded a running `cash_reserved` accumulator
+through `agent()`'s market-list construction, so each builder from feed
+onward sees `farm["money"] - cash_reserved` instead of the raw balance.
+First version deliberately left SELL out of the estimate (it earns money,
+not spends it), reasoning that ignoring real revenue could only delay a
+purchase by a turn, never wrongly deny it -- **that reasoning was wrong**:
+tested alone (no 14th consolidation), it cost real games against the two
+reactive self-play sentinels that best resemble a real opponent
+(`main_plant_priority_submitted_20260818.py` 40.0% -> 20.0%,
+`main_price_reactive_seed_reserve_submitted_20260819.py` 53.3% -> 23.3%,
+both roughly halved), because the same conservative gap reopens every
+turn a sell also happens -- a purchase that only becomes affordable
+*after* this turn's own sell revenue lands stays chronically starved
+under this scheme, not delayed once. Fixed by giving `_orders_cash_cost`
+a signed return (SELL orders subtract, i.e. add to the available budget)
+and seeding `cash_reserved` from the turn's own sell orders. This fully
+recovered both sentinels (40.0%/43.3%, matching the un-budgeted baseline
+within noise) and the full pool (69.0%, matching baseline's 69.5%) --
+**kept as a real, validated, standalone correctness fix**, same category
+as the 12th/15th.
+
+Paired with the 14th's exact consolidated `_build_feed_orders` (the real
+target this whole cash-budget mechanism was built to rescue), the
+buggy (SELL-ignoring) version actually helped substantially against
+`tape_kiro` (0W-30L -> 7W-23L, 23.3%) -- but the corrected (SELL-aware)
+version gave almost all of that back (down to 1W-29L, 3.3%), and BOTH
+versions paired with the 14th still devastated the two reactive
+sentinels (SELL-ignoring: 3.3%/3.3%; SELL-aware: 3.3%/10.0% -- barely
+better, nowhere near the un-paired 40.0%/43.3%) and landed the same full
+pool total either way (58.1%, both versions, to the percentage point).
+**This is the tell**: the buggy version's `tape_kiro` gain wasn't really
+about cash scheduling at all -- an accounting bug that systematically
+under-spends is just another way to throttle this agent's own aggregate
+WHEAT/seed market activity, which is exactly the lever that's helped
+against `tape_kiro` specifically (and only `tape_kiro`) every time it's
+been pulled by accident across this whole investigation (9th, 10th, 13th
+attempts), while still costing real games against any opponent that
+actually reacts. Fixing the accounting bug removed the accidental
+throttle and the `tape_kiro` gain evaporated with it, while the
+consolidation's cost against reactive opponents didn't move at all --
+proving that cost was never a scheduling artifact this or the 15th
+attempt's mechanism could reach in the first place.
+
+**Sixteen attempts total. Three independent, well-reasoned rescue
+mechanisms for the 14th's consolidation -- crew-priority (15th), buggy
+cash-budget (16th v1), correct cash-budget (16th v2) -- have now each
+failed against reactive opponents specifically, while each of the first
+two's *unpaired* form survived as a genuine small correctness fix. A
+seventeenth attempt should stop looking for a third resource to protect
+around the consolidation and treat this as settled: freeing WHEAT/seed
+slots costs real games against any opponent capable of reacting,
+independent of *how* the freed capacity is spent (crew-turns or cash),
+which means the cost isn't a side-channel resource-contention effect at
+all -- it's WHEAT/seed volume itself moving the shared market against
+this agent whenever an opponent can adapt to it. If the 14th's mechanism
+is ever revisited, it needs a lever that changes *how much* aggregate
+WHEAT/seed activity increases, not just how fairly the knock-on capacity
+gets allocated afterward -- and should be judged primarily against the
+two reactive self-play sentinels and the full pool, not `tape_kiro` alone
+(now confirmed to reward almost any reduction in this agent's own
+spending activity, real quality improvement or not).**
 
 Still out of scope: any opponent modeling -- this agent only ever reacts to
 its own farm/market state. See rl/README.md for the parallel (currently
@@ -819,6 +896,10 @@ FEED_MAX_PRICE_FRAC = 5.0  # a near-nonbinding backstop, not a real cap: missing
                             # inflated wheat price -- see the module docstring's WHEAT
                             # sell/rebuy round trip note for why a tighter cap is a trap
                             # (below ~1.4x base, animals starve outright in testing)
+
+FARM_HAND_COST_MULT = 1  # data/README.md default; mirrors kaggriculture.py's own constant,
+                          # used only to estimate HIRE's own same-turn cash draw -- see
+                          # _orders_cash_cost
 
 HANDS_BASE = 2  # hands hired even at the starting NW quadrant alone
 HANDS_PER_QUADRANT = 3
@@ -1504,6 +1585,89 @@ def _land_utilization(farm):
     return used / len(unlocked)
 
 
+def _fib(n):
+    """Indexed so _fib(0)=1, _fib(1)=1, _fib(2)=2, _fib(3)=3, _fib(4)=5... --
+    mirrors kaggriculture.py's own `_fib`/`_hire_cost`, duplicated here
+    (rather than imported) since it's a private engine implementation
+    detail, unlike the public constants this module already imports from
+    kaggriculture.py. Used only by _orders_cash_cost to estimate a HIRE
+    order's own same-turn cash draw."""
+    a, b = 1, 1
+    for _ in range(n):
+        a, b = b, a + b
+    return a
+
+
+def _orders_cash_cost(orders, farm, prices):
+    """16th market-order-slot-starvation attempt: estimate the total cash
+    a list of market orders will draw from farm["money"] this turn, using
+    this turn's opening prices/counts -- the same approximation each
+    _build_*_orders function already makes for its own affordability
+    check. Threaded through agent()'s market-order-building sequence as a
+    running same-turn budget, because the engine draws down farm["money"]
+    live, in submitted order-list order, not against a static per-turn
+    snapshot the way each builder was computing its own request in
+    isolation (kaggriculture.py's `_process_market`/`_commit_unit`:
+    per-unit lockstep across the whole order queue, checking `farm["money"]
+    < price` at each individual unit commit). Without this, a builder late
+    in agent()'s list (`_build_animal_orders` is last) can request a
+    purchase it genuinely believed was affordable against the turn's
+    opening balance, only for the engine to silently reject it because
+    earlier orders in the same list (feed, seed, fertilizer) already spent
+    that cash first -- see the module docstring's Same-turn cash
+    competition note, the suspected real mechanism behind the 14th
+    attempt's animal-market-spillover finding.
+
+    Returns a signed total: positive for orders that spend money, negative
+    for SELL orders (settled first in this agent's own list, and the real
+    engine processes the whole list per-unit-lockstep against a single
+    live balance -- see `_process_market`). A first version of this
+    function deliberately left SELL out, reasoning that ignoring real
+    revenue could only delay a purchase by a turn, never wrongly deny it.
+    That reasoning was wrong against a reactive opponent: the same
+    conservative gap reopens every turn a sell also happens, so a purchase
+    that only becomes affordable *after* this turn's own sell revenue
+    lands can end up chronically starved, not delayed once -- measured
+    directly: leaving SELL out cost real games against reactive self-play
+    opponents (main_plant_priority_submitted_20260818.py 40% -> 20%,
+    main_price_reactive_seed_reserve_submitted_20260819.py 53.3% -> 23.3%,
+    both roughly halved) even while it helped substantially against
+    tape_kiro once paired with the 14th attempt's feed consolidation (0%
+    -> 23.3%) -- see the module docstring's Same-turn cash competition
+    note for the full comparison."""
+    total = 0.0
+    n_extra = len(farm["unlocked_quadrants"]) - 1
+    hires_so_far = farm["hires_today"]
+    for order in orders:
+        op = order[0]
+        if op == "SELL":
+            item = order[1]
+            qty = order[2] if len(order) > 2 else 1
+            base = MARKET_PARAMS[item]["base"]
+            total -= qty * prices.get(item, base)
+        elif op == "BUY_PRODUCT":
+            item = order[1]
+            qty = order[2] if len(order) > 2 else 1
+            base = MARKET_PARAMS[item]["base"]
+            total += qty * prices.get(item, base)
+        elif op == "BUY_SEED":
+            item = order[1]
+            qty = order[2] if len(order) > 2 else 1
+            total += qty * CROPS[item]["seed"]
+        elif op == "BUY_ANIMAL":
+            item = order[1]
+            qty = order[2] if len(order) > 2 else 1
+            total += qty * ANIMALS[item]["cost"]
+        elif op == "BUY_LAND":
+            if 0 <= n_extra < len(LAND_PRICES):
+                total += LAND_PRICES[n_extra]
+            n_extra += 1
+        elif op == "HIRE":
+            total += FARM_HAND_COST_MULT * _fib(hires_so_far)
+            hires_so_far += 1
+    return total
+
+
 def _build_land_orders(farm, days_remaining):
     if days_remaining < LAND_CUTOFF_DAYS:
         return []  # a fresh quadrant can't earn back its cost this close to the end
@@ -1764,14 +1928,40 @@ def agent(obs, config=None):
     ]
     farmer_action, hands_actions = actions[0], actions[1:]
 
+    # 16th market-order-slot-starvation attempt: cash_reserved tracks what earlier orders in
+    # this same list have already committed to spend, so a later builder (_build_animal_orders
+    # is last) sees the same shrinking budget the engine's own per-unit lockstep loop will
+    # actually enforce, instead of every builder independently checking the turn's full opening
+    # balance -- see _orders_cash_cost's own docstring and the module docstring's Same-turn cash
+    # competition note.
     market = []
-    market += _build_sell_orders(shed, market_prices, days_remaining)
-    market += _build_land_orders(farm, days_remaining)
-    market += _build_hire_orders(farm)
-    market += _build_feed_orders(farm, private, market_prices, farm["money"])
-    market += _build_seed_orders(seeds, farm["money"], days_remaining, market_prices)
-    market += _build_fertilizer_orders(private, market_prices, farm["money"], want_fertilizer)
-    market += _build_animal_orders(farm, private, farm["money"])
+    sell_orders = _build_sell_orders(shed, market_prices, days_remaining)
+    market += sell_orders
+    cash_reserved = _orders_cash_cost(sell_orders, farm, market_prices)  # negative: SELL earns
+
+    land_orders = _build_land_orders(farm, days_remaining)
+    market += land_orders
+    cash_reserved += _orders_cash_cost(land_orders, farm, market_prices)
+
+    hire_orders = _build_hire_orders(farm)
+    market += hire_orders
+    cash_reserved += _orders_cash_cost(hire_orders, farm, market_prices)
+
+    feed_orders = _build_feed_orders(farm, private, market_prices, farm["money"] - cash_reserved)
+    market += feed_orders
+    cash_reserved += _orders_cash_cost(feed_orders, farm, market_prices)
+
+    seed_orders = _build_seed_orders(seeds, farm["money"] - cash_reserved, days_remaining, market_prices)
+    market += seed_orders
+    cash_reserved += _orders_cash_cost(seed_orders, farm, market_prices)
+
+    fertilizer_orders = _build_fertilizer_orders(
+        private, market_prices, farm["money"] - cash_reserved, want_fertilizer
+    )
+    market += fertilizer_orders
+    cash_reserved += _orders_cash_cost(fertilizer_orders, farm, market_prices)
+
+    market += _build_animal_orders(farm, private, farm["money"] - cash_reserved)
     market = market[:MAX_MARKET_ORDERS]
 
     return {"farmer": farmer_action, "hands": hands_actions, "market": market}

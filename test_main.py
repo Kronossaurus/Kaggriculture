@@ -279,6 +279,46 @@ def test_build_land_orders_buys_the_4th_quadrant_now_that_it_raises_capacity():
     assert orders == [["BUY_LAND"]]
 
 
+def test_orders_cash_cost_sums_across_order_types():
+    """16th market-order-slot-starvation attempt: _orders_cash_cost is the
+    running same-turn budget agent() threads through its market-order-
+    building sequence so a late builder (_build_animal_orders) doesn't
+    request a purchase against cash earlier orders in the same list
+    already committed -- see the module docstring's Same-turn cash
+    competition note."""
+    farm = {"unlocked_quadrants": ["NW", "NE"], "hires_today": 1}
+    prices = {"WHEAT": 30}
+    orders = [
+        ["BUY_PRODUCT", "WHEAT", 2],
+        ["BUY_SEED", "MELON", 1],
+        ["BUY_ANIMAL", "COW", 1],
+        ["BUY_LAND"],
+        ["HIRE"],
+    ]
+    cost = main._orders_cash_cost(orders, farm, prices)
+    expected = (
+        2 * 30                                            # BUY_PRODUCT WHEAT x2 @ 30
+        + main.CROPS["MELON"]["seed"]                      # BUY_SEED MELON
+        + main.ANIMALS["COW"]["cost"]                       # BUY_ANIMAL COW
+        + main.LAND_PRICES[len(farm["unlocked_quadrants"]) - 1]  # BUY_LAND, n_extra=1
+        + main.FARM_HAND_COST_MULT * main._fib(farm["hires_today"])  # HIRE, the 2nd hire today
+    )
+    assert cost == expected
+
+
+def test_orders_cash_cost_sell_orders_are_negative_revenue():
+    """SELL orders earn money rather than spend it, so they contribute a
+    negative amount -- the second version of this function (see its
+    docstring): leaving SELL out entirely was tried first and measured
+    worse against reactive opponents (a purchase that only becomes
+    affordable after this turn's own sell revenue lands would otherwise
+    stay chronically starved, not just delayed one turn)."""
+    farm = {"unlocked_quadrants": ["NW"], "hires_today": 0}
+    prices = {"WHEAT": 25}
+    orders = [["SELL", "WHEAT", 4]]
+    assert main._orders_cash_cost(orders, farm, prices) == -100.0
+
+
 def _animal_tile(kind="PASTURE"):
     return {"kind": kind, "animal": "COW" if kind == "PASTURE" else "GOOSE"}
 
