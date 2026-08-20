@@ -438,6 +438,56 @@ back WHEAT only when its *own* price is unusually low relative to its
 own recent range (not a fixed reserve size or a bigger target share),
 though this hasn't been tried and isn't assumed to work either.
 
+**An eleventh attempt found a real, previously-undiscovered structural
+gap, not another tuning knob -- but the direct fix has its own,
+different failure mode.** `_find_target`'s `carried_produce_total`/
+`_decide_unit`'s `carried_produce` both exclude WHEAT from the general
+"carry harvested produce back to the shed" mechanic (`k not in ("WHEAT",
+*ANIMAL_KINDS)`), same as the animal-placement tokens. Unlike those
+tokens, WHEAT has no other route to the shed except DROP -- which dumps
+a unit's *entire* inventory (data/README.md), so WHEAT only reaches the
+shed as an incidental bystander when a unit happens to also be carrying
+some other crop that itself triggers a shed-return. This means our own
+WHEAT harvest mostly never reaches the shed at all: it either gets
+consumed directly by an immediate FEED opportunity (priority -1, still
+wins) or sits stranded in a unit's inventory indefinitely. This explains
+several things at once: why our own `purchase_trace` WHEAT
+`total_acquired`/`total_requested` ratio (~1.2x) is so much smaller than
+the top player's (~1.75x, see the ninth attempt's note) -- their harvest
+genuinely reaches their shed, ours mostly doesn't; and why the sell-side
+reserve attempts (three sizes plus the tenth's production-funded
+variant) never had much organic supply to reserve *from* in the first
+place.
+
+The direct fix -- just remove WHEAT from both exclusions, so it
+participates in the normal carried-produce shed-return logic like any
+other crop -- tests catastrophically, but through a *different*
+mechanism than any of the previous ten: `tape_kiro` 63.3% -> **0.0%**
+(0W-30L), mean money collapsing to $2,648 (vs. baseline's ~$50k, not just
+a percentage regression). A same-seed trajectory showed why: **weed
+count exploded from 8 to 34 by game end** (on 75 owned tiles) -- not a
+market-price effect at all. WHEAT matures in just 2 days and is a single-
+shot harvest (`interval=0`, replant every cycle) at 25% of the crop mix,
+so a large fraction of units are carrying *some* small amount of WHEAT
+almost continuously. Once that counts toward `carried_produce`, each of
+those small harvests can trigger a dedicated shed trip (routine priority
+5, or urgent priority 2 once `CARRIED_PRODUCE_URGENT_THRESHOLD=3` is hit
+-- trivially easy with WHEAT's own max_yield of 6/harvest), pulling units
+away from routine watering/weeding often enough that crops rot into
+weeds faster than they can be tended. **Reverted** (never committed).
+
+The underlying gap is real and still unfixed -- WHEAT genuinely has no
+organic path to the shed today, unlike every other crop -- but naively
+treating it identically to slower-cycling, lower-volume crops in the same
+priority/threshold scheme is itself the new failure mode. Any twelfth
+attempt needs WHEAT to reach the shed without generating a dedicated trip
+for every small, frequent harvest -- e.g. only counting it toward
+`carried_produce`/triggering a return once a unit is already carrying a
+larger amount (a WHEAT-specific threshold, distinct from
+`CARRIED_PRODUCE_URGENT_THRESHOLD`), or piggybacking it onto shed trips
+already happening for other reasons instead of ever justifying one on its
+own -- not a blanket inclusion in the existing mechanic.
+
 Still out of scope: any opponent modeling -- this agent only ever reacts to
 its own farm/market state. See rl/README.md for the parallel (currently
 stalled) attempt at a learned policy. See this project's session memory for
