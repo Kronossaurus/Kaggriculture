@@ -177,19 +177,31 @@ truncated to `maxMarketOrdersPerTurn` (10). `_build_feed_orders` (one
 `BUY_PRODUCT WHEAT` order per unit needing feed, sometimes 8-9 orders alone)
 routinely crowds out `BUY_SEED`/fertilizer orders most turns, confirmed
 directly in replay `action.market` data and a real cause of planted-tile
-counts collapsing over the back half of a season despite idle cash. Five
-independent fix attempts across this project (full order consolidation
-twice, an order-count cap, a WHEAT sell-side reserve, a per-order quantity
-cap) all measured as real regressions on a clean same-process 30-seed A/B,
-consistently worst against a genuine non-mirror opponent
-(`reference/tape_kiro.py`) -- the likely mechanism is that this agent's own
-per-unit affordability check uses a static price and doesn't account for the
-engine's own within-order price walk, so any change that lets a turn request
-more WHEAT in fewer, larger orders ends up spending more at a worse average
-price than the old scheme's incidental slot-count cap ever allowed. Treat
-this as settled without new instrumentation (e.g. tracking realized purchase
-prices turn-by-turn, old vs. new, in the same replay) -- not a queue of
-ideas still worth blind-testing.
+counts collapsing over the back half of a season despite idle cash --
+confirmed at scale against 33 real ladder episodes from a live submission:
+94% mean crop-count collapse from peak by game end (vs. 72.3% for
+opponents), seed orders at exactly 0/turn for a mean 12.2 of the last 15
+days per game. Six independent fix attempts across this project (full order
+consolidation twice, an order-count cap, a WHEAT sell-side reserve, a
+per-order quantity cap, and same-turn sell/feed coordination -- see the
+WHEAT sell/rebuy round trip note below for the sixth's own detailed
+writeup) all measured as real regressions on a clean same-process 30-seed
+A/B, consistently worst against a genuine non-mirror opponent
+(`reference/tape_kiro.py`, 0W-30L for the sixth attempt -- the worst
+sentinel result yet). The first five share one likely mechanism: this
+agent's own per-unit affordability check uses a static price and doesn't
+account for the engine's own within-order price walk, so any change that
+lets a turn request more WHEAT in fewer, larger orders ends up spending
+more at a worse average price than the old scheme's incidental slot-count
+cap ever allowed. The sixth attempt built and used the previously-missing
+instrumentation (`scripts/analyze_replay.py --orders`/`--purchase-trace`,
+now available -- see their own docstrings) and found a *different*
+mechanism specific to it (a standing WHEAT-price-level shift from reduced
+sell volume, not the within-order price walk -- see below); freeing market
+slots is confirmed real and reproducible but is not sufficient on its own.
+Any further attempt should use this same instrumentation to check its
+purchase-price and slot-occupancy effects before trusting a 30-seed A/B
+result, not just cite this note.
 
 **Seed reserve**: `SEED_RESERVE = {"MELON": 3, "WHEAT": 3, "CARROT": 3,
 "TOMATO": 2, "STRAWBERRY": 2}` scales up per-crop by
@@ -239,10 +251,34 @@ decides the outcome. A random-search sweep of `WHEAT_SELL_THRESHOLD` /
 that held up at 30 seeds either, though it did surface a hard floor worth
 remembering: `FEED_MAX_PRICE_FRAC` below ~1.4 can't clear the price often
 enough to feed animals at all (catastrophic, animals lost outright) --
-today's 5.0 has plenty of headroom above that. The round trip itself is
-still real and still unaddressed; a smaller-footprint idea (coordinating the
-sell and feed decisions within the same turn instead of a standing reserve)
-is worth trying before another reserve-sizing attempt.
+today's 5.0 has plenty of headroom above that. A sixth attempt -- coordinating
+`_build_sell_orders` and `_build_feed_orders` within the same turn (hold back
+exactly `live * FEED_RESERVE_PER_ANIMAL` WHEAT from the sell dump, the same
+formula the feed side already computes, instead of a standalone reserve
+constant) -- was built with new instrumentation this time
+(`scripts/analyze_replay.py --orders`/`--purchase-trace`) rather than blind.
+The order-slot side of the fix genuinely worked (seed orders that were
+completely zeroed for 12-17 straight days in real ladder replays started
+getting through again, confirmed both offline against historical replay data
+and live), but it regressed hard anyway: 146W-64L -> 100W-110L against the
+pool (69.5% -> 47.6%), and 19W-11L -> 0W-30L against `reference/tape_kiro.py`
+specifically, the worst sentinel result of any attempt in this file's
+history. `--purchase-trace WHEAT` on a flipped matchup pinned the mechanism
+precisely, and it's a different one than the first five attempts: not the
+static-price-vs-within-order-price-walk effect (the `next_price/decision_
+price` ratio stayed ~1.00, flat, ruling that out here), but a standing
+supply/demand shift -- selling less WHEAT per turn means less downward price
+pressure on it, so WHEAT's market price sits higher throughout the game, and
+since feed rebuys happen far more often than sell-triggering harvests, the
+agent ends up paying much more per unit for the far more frequent purchase
+side of the round trip (realized average WHEAT purchase price 5x higher,
+$18.53 -> $92.63/unit, on the traced matchup) than it gains back from
+selling into that higher price occasionally. Freeing market-order slots is
+not sufficient on its own if it changes the standing market price regime.
+The round trip and the slot-starvation collapse it causes are both still
+real and still unaddressed; don't retry either the reserve-sizing or the
+same-turn-coordination shape again without a new idea that doesn't suppress
+aggregate WHEAT sell volume.
 
 Still out of scope: any opponent modeling -- this agent only ever reacts to
 its own farm/market state. See rl/README.md for the parallel (currently
