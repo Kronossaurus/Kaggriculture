@@ -70,6 +70,49 @@ correlation in the replay data is real but isn't simply "run more animals
 ourselves"; the leading open question is whether it's really about how
 efficiently those opponents convert flock into money, not flock size).
 
+**Pasture zone drift (next-steps item 2, investigated and reverted
+2026-08-20).** `_animal_zone` reserves `needed` near-shed empty tiles, where
+`needed` is `remaining_structures()` -- sized against `_animal_target`,
+itself sized off *currently unlocked* land, which grows in jumps as
+quadrants get bought. A replay trace confirmed a real gap: PASTURE build
+order on one game went distance-to-shed 0,2,2,3 (day 0) -> 1,2,2 (day 10) ->
+0,2 (day 11) -> 2,**6** (day 15) -> **6** (day 16) -- and at day 15 an empty
+tile at distance 1, in an already-unlocked quadrant, sat unclaimed the same
+turn a structure went up at distance 6. Crops fill whatever's empty and
+unreserved the moment it's available; by the time land growth pushes
+`_animal_target` up again, the near-shed ring within an already-open
+quadrant is already gone, so new structures land wherever's still empty --
+the far corners.
+
+Two magnitudes tried, both reverted -- not a "wrong constant," a genuine
+structural cost. Both added a second, more generous sizing for the zone
+alone (never touching `_animal_target`/`remaining_structures` itself, so
+neither changed how many animals get bought or when -- purely spatial).
+**Unbounded** (reserve toward the eventual full-board/full-crew target
+immediately, up to 13 tiles for a 10x10/12-hand game): catastrophic on the
+first replay check, before any A/B was even run -- day 0, with only 25
+tiles unlocked, this reserved 13 of them (52% of the whole starting
+quadrant) for animal structures not yet funded and not built for many
+turns, starving the early crop economy that funds everything else. Money
+collapsed 79% on the traced seed ($49,478 -> $10,474), crop count crashed to
+2 of 100 tiles by game end. **Bounded to a small constant margin instead**
+(`min(remaining_structures() + N, eventual_target)`, tried at N=2 and N=1):
+no collapse, and the drift itself measurably tightened (worst outlier
+distance 6 -> 5 in the traced replay) -- but both sizes still regressed the
+15-seed pool A/B by roughly the same amount (58.5% baseline -> 45.9% at N=2,
+47.4% at N=1), hitting the same reactive-sentinel matchups hard
+(`main_plant_priority`/`main_price_reactive_seed_reserve`/`tape_kiro` all
+down sharply or to 0% at both sizes). Two very different magnitudes landing
+on the same regression size rules out "wrong margin" -- **any** reservation
+ahead of the exact current lazy shortfall costs more in foregone crop
+planting than the drift it prevents saves, at least against opponents that
+can react to it. Reverted at both sizes, main.py's `_animal_zone` call
+unchanged from the original `remaining_structures()`-only form. The drift
+itself is real and unaddressed; a future attempt needs a mechanism that
+doesn't lock land out of crop use ahead of strict need -- e.g. letting
+crops replant *into* a reserved-but-still-empty zone tile and displacing the
+reservation elsewhere, rather than reserving further out preemptively.
+
 **Price-aware planting** (`_CropPlanner`): a crop currently priced below its
 own sell threshold is skipped for new planting (`_price_ok`) so land doesn't
 keep replanting into a market it just crashed, falling back to ignoring
