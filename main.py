@@ -570,6 +570,78 @@ whether `tape_kiro`'s specific tape makes it an unusually adversarial
 sentinel worth checking against a wider, more representative panel before
 any future attempt is judged solely against it).
 
+**A fourteenth attempt built the mechanistically correct fix the whole
+investigation had been approximating, and it revealed a second, separate
+bottleneck this whole time.** Extracted a second real top-player tape
+(`reference/tape_kawashigi.py`) and confirmed the standing-price collapse
+generalizes beyond `tape_kiro`; then traced *why* the baseline already
+loses to real top players by ~4x money independent of any WHEAT attempt
+at all -- crop-count collapse keeps `_land_utilization` below
+`LAND_UTILIZATION_GATE`, permanently blocking the 4th quadrant (day-by-
+day trace: utilization peaks 52-54% right before a land purchase clears
+the gate, then craters to single digits and never recovers). This
+reframed the goal: fix WHEAT well enough that utilization *stays* above
+the gate, not just win-rate.
+
+Gave `_build_feed_orders` a `slots_used_so_far` parameter and consolidated
+it into **one order capped at exactly `MAX_MARKET_ORDERS - slots_used_
+so_far`** -- not a guessed constant (the 5th attempt's
+`FEED_ORDER_QUANTITY_CAP=8`, wrong because 8 didn't match what would
+actually have gone through) but the literal quantity the old one-order-
+per-unit loop would have delivered before `agent()`'s own truncation cut
+it off. This reproduces the old scheme's aggregate volume/price exactly
+(the engine processes any order "one unit at a time" regardless of split,
+per data/README.md) while using 1 slot instead of many. It worked exactly
+as designed: on a traced seed, `mean_implied_avg_price` didn't regress
+($20.85 -> $20.14, essentially flat -- the first attempt in this entire
+investigation where it didn't get worse), saturated-turn frac dropped
+from 100% to 4-8%, seed orders flowed the whole game, and **the 4th
+quadrant unlocked** (day 21) for the first time in any attempt.
+
+**It still lost 0W-30L to `tape_kiro`, and the full pool (54.8%, ~14 points
+below baseline) landed within noise of the imperfect 13th attempt's 54.3%
+despite a completely different, provably-correct mechanism -- the
+strongest possible evidence a second bottleneck exists.** Traced exactly
+where the money went using `tape_kiro`'s own non-reactivity (it runs a
+fixed tape, so its money can only change via shared market prices):
+computed realized price × quantity for every SELL/BUY_PRODUCT resource it
+touches, old vs. new. The dominant term wasn't WHEAT at all -- **MILK**:
+kiro's own SELL MILK realized $28,294 -> $46,520, a +$18,226 swing that
+dwarfs every other resource (WHEAT purchase actually got *cheaper* for
+kiro, -$1,570). Cross-checked against our own MILK-selling volume: 186 ->
+146 units (-22%), with a few fewer live cows at several mid-game
+checkpoints. Repeated the same trace against `tape_kawashigi`: dominant
+terms were WOOL (+$17,412), FERTILIZER (+$7,685), and MILK (+$5,454) --
+animal byproducts again, netting to within a few percent of that
+matchup's own real money-gap increase.
+
+**The mechanism**: freeing WHEAT/seed market slots shifts crew attention
+and order-slot allocation slightly away from animal husbandry (feed
+maintenance still competes for the same crew-turns, and evidently wins
+slightly less often once crop-side work has real candidates again),
+reducing this agent's own animal-byproduct supply into the shared market
+just enough to raise MILK/WOOL/FERTILIZER prices -- and both real top-
+ladder opponents derive the bulk of their revenue from exactly those
+byproducts (`tape_kiro`, `tape_kawashigi` both run animal-majority land
+shares), so a shared-price rise nets them far more than it nets this
+agent, which sells comparatively little of any of them. **Fixing the
+crop-side starvation trades a real gain there for a real, opponent-
+specific loss on the animal side, and against animal-heavy real
+opponents specifically, the loss outweighs the gain.** Reverted (never
+committed as working code) -- not because the fix was wrong, but because
+it's provably insufficient alone.
+
+**Fourteen attempts across four sessions plus one threshold-sweep redo.**
+The WHEAT/seed-slot mechanism itself is now solved in principle (this
+attempt's consolidation shape is the correct one, kept only out of the
+codebase, not out of the analysis). What remains unsolved is the second-
+order animal-market spillover this fix exposes -- a fifteenth attempt
+would need to hold this agent's own animal-byproduct supply (and
+therefore MILK/WOOL/FERTILIZER's shared price) roughly steady while
+still freeing the WHEAT/seed slots, e.g. by not letting the crop-side
+recovery come at animal husbandry's expense in the crew's own priority
+ordering, rather than another variant of the order-slot mechanism itself.
+
 Still out of scope: any opponent modeling -- this agent only ever reacts to
 its own farm/market state. See rl/README.md for the parallel (currently
 stalled) attempt at a learned policy. See this project's session memory for
