@@ -528,6 +528,33 @@ def test_find_target_prioritizes_a_tile_about_to_become_a_weed():
     assert (target[0], target[1]) == (4, 4)  # the at-risk tile wins despite being much farther
 
 
+def test_find_target_prioritizes_an_at_risk_harvestable_tile_over_a_closer_one():
+    """See the module docstring's Harvest-ready tiles rotting to weeds note:
+    a harvestable tile is still subject to the same 2-consecutive-miss WEED
+    conversion as an unharvested one, but priority alone (0, already top
+    tier) can't express that urgency since every harvest ties there --
+    HARVEST_AT_RISK_DIST_BIAS must make an at-risk-and-ripe tile win the
+    distance tie-break over a merely-closer, not-yet-at-risk ripe tile, or
+    the farther one silently rots into a WEED despite being top priority."""
+    board_size = 5
+    tiles = [[None for _ in range(board_size)] for _ in range(board_size)]
+    safe = _tile(crop="WHEAT", planted_day=0, watered_today=True, yield_units=1)  # consecutive_unwatered=0
+    at_risk = _tile(crop="WHEAT", planted_day=0, watered_today=False, yield_units=1)  # =1, one miss from WEED
+    tiles[0][1] = safe  # close: (1, 0), dist=1 from (0, 0)
+    tiles[4][4] = at_risk  # far: (4, 4), dist=8 from (0, 0)
+    farm = {"tiles": tiles, "hands": []}
+    animal_planner = main._AnimalPlanner(farm, {}, {})
+    target = main._find_target(
+        pos=[0, 0], farm=farm, day=2, board_size=board_size, claimed=set(), inv={},  # age 2 == WHEAT's first_yield_day
+        planner=main._CropPlanner({"seeds": {}}, farm, days_remaining=20),
+        animal_planner=animal_planner, shed_tiles=set(),
+        want_fertilizer=False, shed_wheat_available=False, liquidating=False,
+        animal_zone=set(), quadrant_util=_NEUTRAL_QUADRANT_UTIL, plant_priority=main.PLANT_PRIORITY,
+    )
+    assert (target[0], target[1]) == (4, 4)  # the at-risk ripe tile wins despite being much farther
+    assert target[2] == 0  # still top priority -- only the tie-break (sort_dist) changed
+
+
 def test_find_target_plant_priority_loses_to_weeding_at_baseline():
     """See the module docstring's Planting priority under the gate note:
     at PLANT_PRIORITY (4), a routine weed-clear (2) always wins regardless

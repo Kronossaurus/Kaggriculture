@@ -152,6 +152,56 @@ outright. Paired with raising `MAX_HANDS` 6 -> 8 (which conveniently matches
 2x the 4-quadrant land cap, so it stops binding at all) to recover a
 capacity dip the priority change caused on its own.
 
+**Harvest-ready tiles rotting to weeds**: a mature, harvestable tile is
+still subject to the same 2-consecutive-miss WEED conversion as an
+unharvested one -- kaggriculture.py's daily refresh doesn't exempt already-
+ripe plants, only harvesting one removes the risk. Before this fix,
+`_find_target`'s HARVEST branch (`_is_harvestable`) never carried an
+urgency signal the way the water branch's `at_risk` flag does, and
+priority-0 harvest candidates (every ripe crop plus every ready animal
+product) were tie-broken by raw distance alone -- so a tile ripe for many
+turns but sitting far from every unit could keep losing to whichever tile
+merely matured most recently nearby, until its own 2-miss clock ran out.
+Confirmed directly in two real ladder losses (see the idle-movement-thrash-
+and-harvest-weed-loss memory): 10 of 13 and 10 of 14 PLANT->WEED
+conversions had already been harvestable, sellable value at some point --
+a real, avoidable loss, not just an unwatered seedling dying young.
+`HARVEST_AT_RISK_DIST_BIAS` biases `sort_dist` (not priority, already top
+tier) for a harvestable tile with `consecutive_unwatered >= 1`, so it's
+served ahead of any merely-closer, non-urgent priority-0 candidate.
+
+**Target stickiness -- tried and reverted.** Offline replay analysis (see the
+idle-movement-thrash-and-harvest-weed-loss memory) found `_find_target`
+recomputing every unit's target from scratch every turn caused real thrash:
+~30% of all movement actions switched to a different destination before the
+previous trip completed, ~85% of those switches to a same- or lower-priority
+tile than the one just abandoned -- never legitimate under the priority-first
+sort. Added a per-unit-index persisted `sticky_target` that kept a unit
+committed to its previous target unless a strictly more urgent candidate
+appeared. Regressed hard once actually validated (a first version had a
+pop-before-read ordering bug that silently made it inert -- its own dedicated
+unit tests passed anyway, since they exercised `_find_target` and
+`_decide_unit` in isolation, never a real two-call sequence through
+`agent()`'s own per-turn wiring; only a same-process 3-way A/B against the
+full pool caught it, after which the bug was fixed and stickiness genuinely
+activated ~50% of the time it applied). With the bug fixed, a clean 30-seed
+A/B (isolated from the harvest-at-risk fix above) dropped the full-pool total
+from 67W-83L (44.7%, item-4 alone) to 43W-107L (28.7%) -- worse than doing
+nothing at all (57W-93L baseline, 38.0%). Regressed against every reactive
+opponent tested (mirror snapshots and a price-reactive one alike); the two
+non-reactive real-tape sentinels' win counts didn't move, only their margin.
+Mechanism not fully pinned down, but plausible: forcing per-unit commitment
+removes the emergent efficiency of the whole crew re-optimizing its
+assignment fresh every turn (a cheap, effective auction-like heuristic this
+agent has relied on all along), trading a small amount of real thrash for a
+worse division of labor overall. **Lesson for next time this area is
+touched**: a "thrash" metric measured from outside the simulation doesn't
+mean the thrashing itself is costly -- verify a fix's activation rate
+directly (e.g. an instrumented offline count like the one that caught the
+inert bug here) *before* trusting a clean-looking unit test suite, and always
+validate with the full A/B panel, never trust intuition about wasted
+movement alone.
+
 **Shed-return priority**: `_find_target`'s priority for walking carried
 produce back to the shed is normally the worst tier (5, below even routine
 watering/weeding) -- fine under a diversified crop mix, but a unit carrying
@@ -818,6 +868,11 @@ SHED_RETURN_URGENT_PRIORITY = 2  # _find_target's priority for walking carried p
                                   # nearby routine chore first (the case that already worked
                                   # fine) while still capping how much value piles up in carry
 CARRIED_PRODUCE_URGENT_THRESHOLD = 3  # see SHED_RETURN_URGENT_PRIORITY
+HARVEST_AT_RISK_DIST_BIAS = 1000  # subtracted from a harvestable tile's sort_dist when it's one
+    # missed watering away from turning into a WEED (see _find_target's HARVEST branch) --
+    # large enough to strictly dominate any real on-board distance, so an about-to-expire ripe
+    # tile is always served before a merely-closer one still within priority 0. See the module
+    # docstring's Harvest-ready tiles rotting to weeds note.
 WHEAT_SHED_RETURN_THRESHOLD = 5  # minimum carried WHEAT before it's worth a dedicated trip to
     # the shed (_find_target) or before it's eligible to DROP once already there
     # (_decide_unit) -- 12th market-order-slot-starvation attempt. Must exceed the 4-unit cap
@@ -1334,7 +1389,16 @@ def _find_target(
             dist = abs(x - fx) + abs(y - fy)
             if _is_plant(tile):
                 if _is_harvestable(tile, day):
-                    candidates.append((x, y, 0, dist))  # harvest
+                    # A harvestable tile is still subject to the same 2-consecutive-miss WEED
+                    # conversion as an unharvested one (kaggriculture.py's daily refresh doesn't
+                    # exempt mature plants) -- harvesting it removes the risk outright, so an
+                    # about-to-expire ripe tile needs to be reached before a merely-closer one
+                    # that has more slack. Priority stays 0 either way (already top tier); the
+                    # bias only breaks ties within it. See the module docstring's Harvest-ready
+                    # tiles rotting to weeds note.
+                    at_risk = not liquidating and tile.get("consecutive_unwatered", 0) >= 1
+                    sort_dist = dist - HARVEST_AT_RISK_DIST_BIAS if at_risk else dist
+                    candidates.append((x, y, 0, sort_dist))  # harvest
                 elif not tile["watered_today"]:
                     at_risk = not liquidating and tile.get("consecutive_unwatered", 0) >= 1
                     # 0.5: below harvest (0, already-earned money, never worth delaying for
