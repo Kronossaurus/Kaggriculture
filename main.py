@@ -224,15 +224,19 @@ the exact loss ("missing a feed this late still loses the whole animal")
 the pre-existing code's own `needs_wheat` design had always protected
 against everywhere else.
 
-**Third attempt: added the missing feed-need guard, kept.** New helper
-`_any_unfed_animal(farm)` (mirrors `_any_fertilizable`); the DROP gate's
-WHEAT clause is now `n >= WHEAT_SHED_RETURN_THRESHOLD or (liquidating and
-not _any_unfed_animal(farm))` (`_decide_unit`'s own `wheat_safe_to_liquidate`
-local). Endgame-only (last `ENDGAME_LIQUIDATION_DAYS=2` days) and now
-requires the standard 15-seed pool A/B (default pool + both reactive
-sentinels + `tape_kiro`/`tape_kawashigi`) to match or beat the 59.3%
-baseline before being trusted -- the two prior shapes are both confirmed
-regressed and must not be reapplied without this guard.
+**Third attempt: added the missing feed-need guard, kept and confirmed.**
+New helper `_any_unfed_animal(farm)` (mirrors `_any_fertilizable`); the DROP
+gate's WHEAT clause is now `n >= WHEAT_SHED_RETURN_THRESHOLD or (liquidating
+and not _any_unfed_animal(farm))` (`_decide_unit`'s own
+`wheat_safe_to_liquidate` local). Endgame-only (last
+`ENDGAME_LIQUIDATION_DAYS=2` days). **Confirmed at the full 30-seed protocol
+(default pool + both reactive sentinels + `tape_kiro`/`tape_kawashigi`)**:
+157W-113L (58.1%) with and without the fix, identical pool total -- the two
+reactive sentinels each flipped exactly one game in opposite directions
+(noise), every other matchup matched win-for-win with mean money within
+$100-1000. The two prior shapes (unbounded `liquidating` clause, and
+`_find_target`-trigger-included) are both confirmed regressed and must not
+be reapplied without this guard.
 
 **Neglected-tile urgency**: a tile that missed watering once
 (`consecutive_unwatered >= 1` -- two consecutive misses turns a PLANT into a
