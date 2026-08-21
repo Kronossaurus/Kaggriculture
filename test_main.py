@@ -123,9 +123,9 @@ def test_decide_unit_digs_a_weed_instead_of_stalling():
     planner = main._CropPlanner({"seeds": {}}, farm, days_remaining=20)
     animal_planner = main._AnimalPlanner(farm, {}, {})
     action = main._decide_unit(
-        pos=[0, 0], inv={}, farm=farm, private={"shed": {}}, day=0, board_size=3, claimed=claimed,
+        pos=[0, 0], inv={}, farm=farm, private={"shed": {}}, day=0, claimed=claimed,
         planner=planner, animal_planner=animal_planner, shed_tiles=set(), want_fertilizer=False, liquidating=False,
-        animal_zone=set(), quadrant_util=_NEUTRAL_QUADRANT_UTIL, plant_priority=main.PLANT_PRIORITY,
+        animal_zone=set(),
     )
     assert action == ["DIG"]
 
@@ -143,10 +143,9 @@ def test_decide_unit_drops_surplus_fertilizer_at_the_shed():
     planner = main._CropPlanner({"seeds": {}}, farm, days_remaining=20)
     animal_planner = main._AnimalPlanner(farm, {}, {})
     action = main._decide_unit(
-        pos=[0, 0], inv={"FERTILIZER": 3}, farm=farm, private={"shed": {}}, day=0, board_size=3,
+        pos=[0, 0], inv={"FERTILIZER": 3}, farm=farm, private={"shed": {}}, day=0,
         claimed=claimed, planner=planner, animal_planner=animal_planner, shed_tiles={(0, 0)},
         want_fertilizer=False, liquidating=False, animal_zone=set(),
-        quadrant_util=_NEUTRAL_QUADRANT_UTIL, plant_priority=main.PLANT_PRIORITY,
     )
     assert action == ["DROP"]
 
@@ -158,17 +157,29 @@ def test_decide_unit_keeps_freshly_picked_up_fertilizer_when_still_needed():
     immediately DROP it back the moment want_fertilizer is still true, or
     every fertilizer pickup livelocks PICKUP/DROP forever -- a 10-seed pool
     comparison with that version collapsed mean money from ~$36-38k to
-    ~$2,290 against `random` alone."""
+    ~$2,290 against `random` alone.
+
+    `_decide_unit` itself no longer walks (that's agent()'s job now, via
+    `_find_personal_target` -- see the module docstring's Routing efficiency
+    note): confirm it doesn't DROP (returns None, not an action, since (0,0)
+    is a shed tile with nothing to do standing still), and separately that
+    the unit's personal target really is the fertilizable tile, not the shed
+    itself -- i.e. it would walk to deliver, not livelock on DROP."""
     farm = _farm_with_one_fertilizable_tile()
     planner = main._CropPlanner({"seeds": {}}, farm, days_remaining=20)
     animal_planner = main._AnimalPlanner(farm, {}, {})
     action = main._decide_unit(
-        pos=[0, 0], inv={"FERTILIZER": 1}, farm=farm, private={"shed": {}}, day=0, board_size=3,
+        pos=[0, 0], inv={"FERTILIZER": 1}, farm=farm, private={"shed": {}}, day=0,
         claimed=set(), planner=planner, animal_planner=animal_planner, shed_tiles={(0, 0)},
         want_fertilizer=True, liquidating=False, animal_zone=set(),
-        quadrant_util=_NEUTRAL_QUADRANT_UTIL, plant_priority=main.PLANT_PRIORITY,
     )
-    assert action == ["EAST"]  # walks toward the fertilizable tile at (2, 2), doesn't DROP
+    assert action is None  # not DROP -- doesn't resolve here, agent() routes it onward
+    target = main._find_personal_target(
+        pos=[0, 0], farm=farm, day=0, board_size=3, claimed=set(), inv={"FERTILIZER": 1},
+        animal_planner=animal_planner, shed_tiles={(0, 0)},
+        want_fertilizer=True, shed_wheat_available=False, liquidating=False,
+    )
+    assert (target[0], target[1]) == (2, 2)  # the fertilizable tile, not another DROP at the shed
 
 
 def test_decide_unit_keeps_freshly_picked_up_wheat_below_the_threshold():
@@ -187,10 +198,9 @@ def test_decide_unit_keeps_freshly_picked_up_wheat_below_the_threshold():
     planner = main._CropPlanner({"seeds": {}}, farm, days_remaining=20)
     animal_planner = main._AnimalPlanner(farm, {}, {})
     action = main._decide_unit(
-        pos=[0, 0], inv={"WHEAT": 4}, farm=farm, private={"shed": {}}, day=0, board_size=3,
+        pos=[0, 0], inv={"WHEAT": 4}, farm=farm, private={"shed": {}}, day=0,
         claimed=set(), planner=planner, animal_planner=animal_planner, shed_tiles={(0, 0)},
         want_fertilizer=False, liquidating=False, animal_zone=set(),
-        quadrant_util=_NEUTRAL_QUADRANT_UTIL, plant_priority=main.PLANT_PRIORITY,
     )
     assert action != ["DROP"]
 
@@ -205,10 +215,9 @@ def test_decide_unit_sells_wheat_below_threshold_during_liquidation():
     planner = main._CropPlanner({"seeds": {}}, farm, days_remaining=1)
     animal_planner = main._AnimalPlanner(farm, {}, {})
     action = main._decide_unit(
-        pos=[0, 0], inv={"WHEAT": 4}, farm=farm, private={"shed": {}}, day=0, board_size=3,
+        pos=[0, 0], inv={"WHEAT": 4}, farm=farm, private={"shed": {}}, day=0,
         claimed=set(), planner=planner, animal_planner=animal_planner, shed_tiles={(0, 0)},
         want_fertilizer=False, liquidating=True, animal_zone=set(),
-        quadrant_util=_NEUTRAL_QUADRANT_UTIL, plant_priority=main.PLANT_PRIORITY,
     )
     assert action == ["DROP"]
 
@@ -226,10 +235,9 @@ def test_decide_unit_keeps_wheat_during_liquidation_if_an_animal_still_needs_it(
     planner = main._CropPlanner({"seeds": {}}, farm, days_remaining=1)
     animal_planner = main._AnimalPlanner(farm, {}, {})
     action = main._decide_unit(
-        pos=[0, 0], inv={"WHEAT": 4}, farm=farm, private={"shed": {}}, day=0, board_size=3,
+        pos=[0, 0], inv={"WHEAT": 4}, farm=farm, private={"shed": {}}, day=0,
         claimed=set(), planner=planner, animal_planner=animal_planner, shed_tiles={(0, 0)},
         want_fertilizer=False, liquidating=True, animal_zone=set(),
-        quadrant_util=_NEUTRAL_QUADRANT_UTIL, plant_priority=main.PLANT_PRIORITY,
     )
     assert action != ["DROP"]
 
@@ -245,10 +253,9 @@ def test_decide_unit_sells_fertilizer_during_liquidation_even_if_still_wanted():
     planner = main._CropPlanner({"seeds": {}}, farm, days_remaining=1)
     animal_planner = main._AnimalPlanner(farm, {}, {})
     action = main._decide_unit(
-        pos=[0, 0], inv={"FERTILIZER": 1}, farm=farm, private={"shed": {}}, day=0, board_size=3,
+        pos=[0, 0], inv={"FERTILIZER": 1}, farm=farm, private={"shed": {}}, day=0,
         claimed=set(), planner=planner, animal_planner=animal_planner, shed_tiles={(0, 0)},
         want_fertilizer=True, liquidating=True, animal_zone=set(),
-        quadrant_util=_NEUTRAL_QUADRANT_UTIL, plant_priority=main.PLANT_PRIORITY,
     )
     assert action == ["DROP"]
 
@@ -263,18 +270,47 @@ def test_step_toward_moves_one_axis_at_a_time():
 
 def test_build_sell_orders_dumps_the_full_shed_stock():
     """Locks the reverted fix (see module docstring): no per-turn cap --
-    a big harvest sells in one order, not spread across several turns."""
+    a big harvest sells in one order, not spread across several turns.
+    No animals on this farm, so the 18th attempt's WHEAT reserve is 0 and
+    doesn't interfere."""
     shed = {"WHEAT": 47}
     prices = {"WHEAT": 30}  # well above WHEAT's 0.45 * base(25) = 11.25 threshold
-    orders = main._build_sell_orders(shed, prices, days_remaining=20)
+    farm = _farm({})
+    orders = main._build_sell_orders(shed, prices, days_remaining=20, farm=farm)
     assert orders == [["SELL", "WHEAT", 47]]
 
 
 def test_build_sell_orders_holds_below_threshold():
     shed = {"MELON": 10}
     prices = {"MELON": 50}  # below 0.65 * base(250) = 162.5
-    orders = main._build_sell_orders(shed, prices, days_remaining=20)
+    farm = _farm({})
+    orders = main._build_sell_orders(shed, prices, days_remaining=20, farm=farm)
     assert orders == []
+
+
+def test_build_sell_orders_holds_back_a_wheat_reserve_for_live_animals():
+    """18th market-order-slot-starvation attempt (see the module docstring
+    and .omc/plans/ralplan-wheat-feed-consolidation.md): with live animals
+    on the farm, WHEAT sells shed-qty minus `live * min(WHEAT_SELL_RESERVE_
+    DAYS, days_remaining)` instead of the full shed -- mirrors the X594
+    kernel-pull reference's own reserve shape. 2 animals, days_remaining=20
+    (>= WHEAT_SELL_RESERVE_DAYS=3) -> reserve = 2*3 = 6."""
+    farm = _farm({(0, 0): _animal_tile(), (1, 0): _animal_tile()})
+    shed = {"WHEAT": 20}
+    prices = {"WHEAT": 30}
+    orders = main._build_sell_orders(shed, prices, days_remaining=20, farm=farm)
+    assert orders == [["SELL", "WHEAT", 14]]
+
+
+def test_build_sell_orders_wheat_reserve_ignored_when_liquidating():
+    """The reserve never withholds the endgame liquidation dump -- missing
+    it would strand cash in unsold inventory at game end, same failure mode
+    the reserve is meant to avoid for feed, not cause on the sell side."""
+    farm = _farm({(0, 0): _animal_tile(), (1, 0): _animal_tile()})
+    shed = {"WHEAT": 20}
+    prices = {"WHEAT": 5}  # below threshold -- only liquidating forces the sell here
+    orders = main._build_sell_orders(shed, prices, days_remaining=1, farm=farm)
+    assert orders == [["SELL", "WHEAT", 20]]
 
 
 def test_build_land_orders_blocked_below_utilization_gate():
@@ -370,21 +406,36 @@ def test_build_feed_orders_skipped_when_reserve_already_met():
     assert main._build_feed_orders(farm, private, prices, money=10000.0) == []
 
 
-def test_build_feed_orders_deliberately_ignores_wheat_carried_by_units():
-    """Locks the *reverted* 17th attempt (see the module docstring's
-    Carried-stock accounting note). Counting carried WHEAT toward the
-    reserve is the obviously correct accounting -- `_build_fertilizer_
-    orders` already does exactly that -- and it fixes the market-order-slot
-    starvation outright, but it also cuts WHEAT sales 70% along with the
-    purchases, and WHEAT throughput is this agent's largest profit centre
-    (net +$35k of a $57k final). Measured cost: reactive sentinels 51.7% ->
-    3.3%, full pool 71.9% -> 57.6%. This test exists so the "fix" isn't
-    re-applied as an obvious cleanup without reading why it's not one."""
+def test_build_feed_orders_counts_carried_wheat_and_consolidates_into_one_order():
+    """18th market-order-slot-starvation attempt (see the module docstring
+    and .omc/plans/ralplan-wheat-feed-consolidation.md). Supersedes this
+    test's own prior version, which locked the *opposite* behavior (ignoring
+    carried WHEAT, one order per unit of shortfall) as the 17th attempt's
+    deliberately-reverted shape -- carried-inclusive accounting alone was a
+    real regression back then (cut WHEAT sales 70% along with purchases,
+    reactive sentinels 51.7% -> 3.3%). This time it's paired with
+    `_build_sell_orders`'s own new WHEAT reserve rather than an unchanged
+    sell side, mirroring the X594 kernel-pull reference's combination --
+    unvalidated as of this commit, see the plan for status. 1 animal ->
+    reserve = 2 (FEED_RESERVE_PER_ANIMAL); shed 0 + carried 3 already covers
+    it, so no order at all now (the old shed-only accounting would have
+    still requested 2)."""
     farm = _farm({(0, 0): _animal_tile()})  # 1 animal -> reserve = 2
     private = {"shed": {"WHEAT": 0}, "inventories": [{"WHEAT": 3}]}
     prices = {"WHEAT": 25}
     orders = main._build_feed_orders(farm, private, prices, money=10000.0)
-    assert orders == [["BUY_PRODUCT", "WHEAT", 1], ["BUY_PRODUCT", "WHEAT", 1]]
+    assert orders == []
+
+
+def test_build_feed_orders_consolidates_a_real_shortfall_into_one_order():
+    """Same accounting as above but with a genuine shortfall: 2 animals ->
+    reserve = 4; shed 0 + carried 1 leaves 3 needed -- one order for the
+    full amount, not three separate ['BUY_PRODUCT','WHEAT',1] orders."""
+    farm = _farm({(0, 0): _animal_tile(), (1, 0): _animal_tile()})  # 2 animals -> reserve = 4
+    private = {"shed": {"WHEAT": 0}, "inventories": [{"WHEAT": 1}]}
+    prices = {"WHEAT": 25}
+    orders = main._build_feed_orders(farm, private, prices, money=10000.0)
+    assert orders == [["BUY_PRODUCT", "WHEAT", 3]]
 
 
 def test_build_seed_orders_scales_reserve_up_with_an_attractive_price():
@@ -518,6 +569,44 @@ def test_crop_planner_excludes_crops_that_cannot_mature_in_time():
     assert planner.choose() in ("WHEAT", "CARROT")
 
 
+def _resolve_target(
+    pos, farm, day, board_size, inv, planner, animal_planner, shed_tiles,
+    want_fertilizer, shed_wheat_available, liquidating, animal_zone,
+    quadrant_util=None, plant_priority=None,
+):
+    """Test helper mirroring agent()'s post-on-tile routing for a single unit -- the
+    personal (inventory-dependent) candidate from _find_personal_target and the shared
+    tile-job pool from _build_tile_jobs, compared together the same way _assign_tile_jobs
+    would for a real turn (see the module docstring's Routing efficiency note). Replaces the
+    old single-scan _find_target these tests were written against; kept as a test-only
+    convenience since production code always has >=1 unit and uses _assign_tile_jobs
+    directly. Returns (x, y, priority) or None."""
+    if quadrant_util is None:
+        quadrant_util = _NEUTRAL_QUADRANT_UTIL
+    if plant_priority is None:
+        plant_priority = main.PLANT_PRIORITY
+    claimed = set()
+    personal = main._find_personal_target(
+        pos, farm, day, board_size, claimed, inv, animal_planner, shed_tiles,
+        want_fertilizer, shed_wheat_available, liquidating,
+    )
+    if personal is not None:
+        claimed.add((personal[0], personal[1]))
+    jobs = main._build_tile_jobs(
+        farm, day, board_size, claimed, animal_zone, quadrant_util, plant_priority,
+        liquidating, planner, animal_planner,
+    )
+    fx, fy = pos
+    scored = [(x, y, prio, abs(x - fx) + abs(y - fy) + bias) for (x, y, prio, bias) in jobs]
+    if personal is not None:
+        scored.append(personal)  # already (x, y, prio, dist) -- no bias to add
+    if not scored:
+        return None
+    scored.sort(key=lambda c: (c[2], c[3]))
+    x, y, prio, _ = scored[0]
+    return (x, y, prio)
+
+
 def test_find_target_shed_return_stays_routine_below_the_carry_threshold():
     """Locks the targeted shed-return fix (see the module docstring's
     Shed-return priority, targeted second attempt note): carrying fewer
@@ -531,12 +620,12 @@ def test_find_target_shed_return_stays_routine_below_the_carry_threshold():
     farm = {"tiles": tiles, "hands": []}
     animal_planner = main._AnimalPlanner(farm, {}, {})
     small_load = {"STRAWBERRY": main.CARRIED_PRODUCE_URGENT_THRESHOLD - 1}
-    target = main._find_target(
-        pos=[0, 0], farm=farm, day=0, board_size=board_size, claimed=set(), inv=small_load,
+    target = _resolve_target(
+        pos=[0, 0], farm=farm, day=0, board_size=board_size, inv=small_load,
         planner=main._CropPlanner({"seeds": {}}, farm, days_remaining=20),
         animal_planner=animal_planner, shed_tiles={(4, 4)},  # far: dist=8
         want_fertilizer=False, shed_wheat_available=False, liquidating=False,
-        animal_zone=set(), quadrant_util=_NEUTRAL_QUADRANT_UTIL, plant_priority=main.PLANT_PRIORITY,
+        animal_zone=set(),
     )
     assert (target[0], target[1]) == (1, 0)  # cares for the nearby animal instead of walking home
 
@@ -549,12 +638,12 @@ def test_find_target_shed_return_turns_urgent_above_the_carry_threshold():
     farm = {"tiles": tiles, "hands": []}
     animal_planner = main._AnimalPlanner(farm, {}, {})
     big_load = {"STRAWBERRY": main.CARRIED_PRODUCE_URGENT_THRESHOLD}
-    target = main._find_target(
-        pos=[0, 0], farm=farm, day=0, board_size=board_size, claimed=set(), inv=big_load,
+    target = _resolve_target(
+        pos=[0, 0], farm=farm, day=0, board_size=board_size, inv=big_load,
         planner=main._CropPlanner({"seeds": {}}, farm, days_remaining=20),
         animal_planner=animal_planner, shed_tiles={(4, 4)},
         want_fertilizer=False, shed_wheat_available=False, liquidating=False,
-        animal_zone=set(), quadrant_util=_NEUTRAL_QUADRANT_UTIL, plant_priority=main.PLANT_PRIORITY,
+        animal_zone=set(),
     )
     assert (target[0], target[1]) == (4, 4)  # cashes out instead
 
@@ -571,12 +660,12 @@ def test_find_target_wheat_below_threshold_stays_held_outside_liquidation():
     farm = {"tiles": tiles, "hands": []}
     animal_planner = main._AnimalPlanner(farm, {}, {})
     small_wheat = {"WHEAT": main.WHEAT_SHED_RETURN_THRESHOLD - 1}
-    target = main._find_target(
-        pos=[0, 0], farm=farm, day=0, board_size=board_size, claimed=set(), inv=small_wheat,
+    target = _resolve_target(
+        pos=[0, 0], farm=farm, day=0, board_size=board_size, inv=small_wheat,
         planner=main._CropPlanner({"seeds": {}}, farm, days_remaining=20),
         animal_planner=animal_planner, shed_tiles={(4, 4)},
         want_fertilizer=False, shed_wheat_available=False, liquidating=False,
-        animal_zone=set(), quadrant_util=_NEUTRAL_QUADRANT_UTIL, plant_priority=main.PLANT_PRIORITY,
+        animal_zone=set(),
     )
     assert (target[0], target[1]) == (1, 0)  # cares for the nearby animal instead of walking home
 
@@ -597,12 +686,12 @@ def test_find_target_wheat_below_threshold_still_stays_held_during_liquidation()
     farm = {"tiles": tiles, "hands": []}
     animal_planner = main._AnimalPlanner(farm, {}, {})
     small_wheat = {"WHEAT": main.WHEAT_SHED_RETURN_THRESHOLD - 1}
-    target = main._find_target(
-        pos=[0, 0], farm=farm, day=0, board_size=board_size, claimed=set(), inv=small_wheat,
+    target = _resolve_target(
+        pos=[0, 0], farm=farm, day=0, board_size=board_size, inv=small_wheat,
         planner=main._CropPlanner({"seeds": {}}, farm, days_remaining=1),
         animal_planner=animal_planner, shed_tiles={(4, 4)},
         want_fertilizer=False, shed_wheat_available=False, liquidating=True,
-        animal_zone=set(), quadrant_util=_NEUTRAL_QUADRANT_UTIL, plant_priority=main.PLANT_PRIORITY,
+        animal_zone=set(),
     )
     assert (target[0], target[1]) == (1, 0)  # still no dedicated trip -- cares for the animal instead
 
@@ -622,12 +711,12 @@ def test_find_target_prioritizes_a_tile_about_to_become_a_weed():
     tiles[4][4] = at_risk  # far: (4, 4), dist=8 from (0, 0)
     farm = {"tiles": tiles, "hands": []}
     animal_planner = main._AnimalPlanner(farm, {}, {})
-    target = main._find_target(
-        pos=[0, 0], farm=farm, day=0, board_size=board_size, claimed=set(), inv={},
+    target = _resolve_target(
+        pos=[0, 0], farm=farm, day=0, board_size=board_size, inv={},
         planner=main._CropPlanner({"seeds": {}}, farm, days_remaining=20),
         animal_planner=animal_planner, shed_tiles=set(),
         want_fertilizer=False, shed_wheat_available=False, liquidating=False,
-        animal_zone=set(), quadrant_util=_NEUTRAL_QUADRANT_UTIL, plant_priority=main.PLANT_PRIORITY,
+        animal_zone=set(),
     )
     assert (target[0], target[1]) == (4, 4)  # the at-risk tile wins despite being much farther
 
@@ -648,12 +737,12 @@ def test_find_target_prioritizes_an_at_risk_harvestable_tile_over_a_closer_one()
     tiles[4][4] = at_risk  # far: (4, 4), dist=8 from (0, 0)
     farm = {"tiles": tiles, "hands": []}
     animal_planner = main._AnimalPlanner(farm, {}, {})
-    target = main._find_target(
-        pos=[0, 0], farm=farm, day=2, board_size=board_size, claimed=set(), inv={},  # age 2 == WHEAT's first_yield_day
+    target = _resolve_target(
+        pos=[0, 0], farm=farm, day=2, board_size=board_size, inv={},  # age 2 == WHEAT's first_yield_day
         planner=main._CropPlanner({"seeds": {}}, farm, days_remaining=20),
         animal_planner=animal_planner, shed_tiles=set(),
         want_fertilizer=False, shed_wheat_available=False, liquidating=False,
-        animal_zone=set(), quadrant_util=_NEUTRAL_QUADRANT_UTIL, plant_priority=main.PLANT_PRIORITY,
+        animal_zone=set(),
     )
     assert (target[0], target[1]) == (4, 4)  # the at-risk ripe tile wins despite being much farther
     assert target[2] == 0  # still top priority -- only the tie-break (sort_dist) changed
@@ -662,8 +751,8 @@ def test_find_target_prioritizes_an_at_risk_harvestable_tile_over_a_closer_one()
 def test_find_target_plant_priority_loses_to_weeding_at_baseline():
     """See the module docstring's Planting priority under the gate note:
     at PLANT_PRIORITY (4), a routine weed-clear (2) always wins regardless
-    of distance -- priority strictly outranks distance in _find_target's
-    sort key."""
+    of distance -- priority strictly outranks distance in the sort key
+    shared by _build_tile_jobs/_assign_tile_jobs."""
     board_size = 5
     tiles = [[None for _ in range(board_size)] for _ in range(board_size)]
     tiles[0][1] = {"kind": "WEED"}  # close: (1, 0), dist=1
@@ -671,11 +760,11 @@ def test_find_target_plant_priority_loses_to_weeding_at_baseline():
     private = {"seeds": {"WHEAT": 5}}
     planner = main._CropPlanner(private, farm, days_remaining=20)
     animal_planner = main._AnimalPlanner(farm, {}, {})
-    target = main._find_target(
-        pos=[0, 0], farm=farm, day=0, board_size=board_size, claimed=set(), inv={},
+    target = _resolve_target(
+        pos=[0, 0], farm=farm, day=0, board_size=board_size, inv={},
         planner=planner, animal_planner=animal_planner, shed_tiles=set(),
         want_fertilizer=False, shed_wheat_available=False, liquidating=False,
-        animal_zone=set(), quadrant_util=_NEUTRAL_QUADRANT_UTIL, plant_priority=main.PLANT_PRIORITY,
+        animal_zone=set(),
     )
     assert (target[0], target[1]) == (1, 0)  # weed wins even though (0,0) itself is plantable
 
@@ -692,12 +781,11 @@ def test_find_target_plant_priority_beats_weeding_under_the_gate():
     private = {"seeds": {"WHEAT": 5}}
     planner = main._CropPlanner(private, farm, days_remaining=20)
     animal_planner = main._AnimalPlanner(farm, {}, {})
-    target = main._find_target(
-        pos=[0, 0], farm=farm, day=0, board_size=board_size, claimed=set(), inv={},
+    target = _resolve_target(
+        pos=[0, 0], farm=farm, day=0, board_size=board_size, inv={},
         planner=planner, animal_planner=animal_planner, shed_tiles=set(),
         want_fertilizer=False, shed_wheat_available=False, liquidating=False,
-        animal_zone=set(), quadrant_util=_NEUTRAL_QUADRANT_UTIL,
-        plant_priority=main.PLANT_PRIORITY_UNDER_GATE,
+        animal_zone=set(), plant_priority=main.PLANT_PRIORITY_UNDER_GATE,
     )
     assert target[2] == main.PLANT_PRIORITY_UNDER_GATE  # a nearby empty tile, not the distant weed
 
@@ -722,12 +810,11 @@ def test_find_target_animal_upkeep_ties_plant_priority_under_the_gate():
     private = {"seeds": {"WHEAT": 5}}
     planner = main._CropPlanner(private, farm, days_remaining=20)
     animal_planner = main._AnimalPlanner(farm, {}, {})
-    target = main._find_target(
-        pos=[0, 0], farm=farm, day=0, board_size=board_size, claimed=set(), inv={},
+    target = _resolve_target(
+        pos=[0, 0], farm=farm, day=0, board_size=board_size, inv={},
         planner=planner, animal_planner=animal_planner, shed_tiles=set(),
         want_fertilizer=False, shed_wheat_available=False, liquidating=False,
-        animal_zone=set(), quadrant_util=_NEUTRAL_QUADRANT_UTIL,
-        plant_priority=main.PLANT_PRIORITY_UNDER_GATE,
+        animal_zone=set(), plant_priority=main.PLANT_PRIORITY_UNDER_GATE,
     )
     assert (target[0], target[1]) == (1, 0)  # the close animal-care tile wins the tie
 
@@ -745,11 +832,11 @@ def test_find_target_animal_upkeep_priority_unchanged_at_baseline():
     private = {"seeds": {}}
     planner = main._CropPlanner(private, farm, days_remaining=20)
     animal_planner = main._AnimalPlanner(farm, {}, {})
-    target = main._find_target(
-        pos=[0, 0], farm=farm, day=0, board_size=board_size, claimed=set(), inv={},
+    target = _resolve_target(
+        pos=[0, 0], farm=farm, day=0, board_size=board_size, inv={},
         planner=planner, animal_planner=animal_planner, shed_tiles=set(),
         want_fertilizer=False, shed_wheat_available=False, liquidating=False,
-        animal_zone=set(), quadrant_util=_NEUTRAL_QUADRANT_UTIL, plant_priority=main.PLANT_PRIORITY,
+        animal_zone=set(),
     )
     assert target[2] == 3
 
@@ -766,11 +853,11 @@ def test_land_utilization_selects_boosted_plant_priority_below_the_gate():
 def test_find_target_prefers_the_less_planted_quadrant_on_a_distance_tie():
     """See the module docstring's spatial clustering (crops) note: a replay
     showed one quadrant planted dense while another sat mostly empty --
-    _find_target's plain nearest-tile-wins selection has no reason to ever
-    look past a marginally-closer chore in the already-crowded quadrant.
-    On a distance tie between an empty tile in a crowded quadrant (NW, 3/4
-    planted) and one in an untouched quadrant (NE, 0/4), the untouched
-    quadrant should win."""
+    the plain nearest-tile-wins selection has no reason to ever look past a
+    marginally-closer chore in the already-crowded quadrant. On a distance
+    tie between an empty tile in a crowded quadrant (NW, 3/4 planted) and
+    one in an untouched quadrant (NE, 0/4), the untouched quadrant should
+    win."""
     board_size = 4
     tiles = [[None for _ in range(board_size)] for _ in range(board_size)]
     for (x, y) in [(0, 0), (1, 0), (0, 1)]:
@@ -780,13 +867,43 @@ def test_find_target_prefers_the_less_planted_quadrant_on_a_distance_tie():
     planner = main._CropPlanner(private, farm, days_remaining=20)
     animal_planner = main._AnimalPlanner(farm, {}, {})
     quadrant_util = main._quadrant_utilization(farm, board_size)
-    target = main._find_target(
-        pos=[1, 0], farm=farm, day=0, board_size=board_size, claimed=set(), inv={},
+    target = _resolve_target(
+        pos=[1, 0], farm=farm, day=0, board_size=board_size, inv={},
         planner=planner, animal_planner=animal_planner, shed_tiles=set(),
         want_fertilizer=False, shed_wheat_available=False, liquidating=False,
-        animal_zone=set(), quadrant_util=quadrant_util, plant_priority=main.PLANT_PRIORITY,
+        animal_zone=set(), quadrant_util=quadrant_util,
     )
     assert (target[0], target[1]) == (2, 0)  # NE's empty tile, not NW's (1, 1) despite equal raw distance
+
+
+def test_assign_tile_jobs_matches_globally_not_order_dependent():
+    """The actual behavior difference this rework is for: two units and two tile-only jobs
+    where the old per-unit sequential scan (unit 0 always gets its own single best pick
+    first) would strand unit 1 with a worse pairing than the crew as a whole could achieve.
+    Unit A is much closer to job 2 than unit B is, and unit B is much closer to job 1 than
+    unit A is -- but job 1 (a weed) also happens to be unit A's own nearest candidate. A
+    sequential scan processing unit A first would give A job 1 (its own nearest), leaving B
+    stuck walking all the way to job 2. The global match must instead give each unit its
+    better-fitting job, since both pairings tie on priority (weed=2 both) and only total
+    distance differs."""
+    jobs = [(1, 0, 2, 0), (9, 0, 2, 0)]  # two same-priority weeds, far apart
+    units = [(0, (0, 0)), (1, (9, 1))]  # unit 0 near job 0; unit 1 near job 1
+    assignment = main._assign_tile_jobs(units, jobs, {})
+    assert assignment[0] == (1, 0)
+    assert assignment[1] == (9, 0)
+
+
+def test_assign_tile_jobs_personal_candidate_competes_fairly_with_the_pool():
+    """See _decide_unit's own docstring: a personal candidate must NOT win outright over a
+    genuinely more urgent pool job -- both compete in the same (priority, distance) sort.
+    Here the personal candidate (a routine shed-return, priority 5) sits right next to the
+    unit, while a much more urgent pool job (priority 0) is farther away -- the pool job must
+    still win despite being farther, since priority dominates distance."""
+    jobs = [(5, 5, 0, 0)]  # a harvest, far away, top priority
+    personal = {0: (0, 1, 5, 1)}  # a routine shed-return, priority 5, right next door
+    units = [(0, (0, 0))]
+    assignment = main._assign_tile_jobs(units, jobs, personal)
+    assert assignment[0] == (5, 5)  # the urgent pool job wins despite being farther
 
 
 def test_animal_target_caps_at_crew_capacity_not_just_land_share():

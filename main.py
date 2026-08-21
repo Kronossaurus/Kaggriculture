@@ -986,6 +986,114 @@ the current list of open next-steps (pasture-placement drift, idle/wandering
 hands, harvest-ready plants converting to weeds, planting stopping early
 around day ~25, WHEAT unliquidated at game end, an opening-book idea for the
 first days).
+
+**WHEAT feed consolidation (18th market-order-slot-starvation attempt) --
+KEPT despite a measured regression, pending further investigation.** A
+public Kaggle kernel (X594, pulled and ground-truthed against this agent --
+full analysis in this project's session memory) beats this agent 2-3x in
+final money while running WHEAT-light: a standing sell-side reserve
+(`WHEAT_SELL_RESERVE_DAYS` in `_build_sell_orders`) plus a carried-inventory-
+inclusive, single consolidated feed order (`_build_feed_orders`) -- the exact
+combination of three properties this codebase's first 17 attempts had only
+ever tried individually (each alone regressed for a different documented
+reason: standing-price effect for a bare reserve, animal-byproduct
+market-spillover or the worst-of-9 result for consolidation alone, -84% WHEAT
+throughput for carried-inclusive accounting alone -- see the 9th/14th/17th
+attempts above). Implemented here for the first time as that full
+combination. Mechanism trace confirmed it works exactly as intended: feed
+order occupancy dropped from ~8.3/10 slots (100% saturated) to ~0.3/10
+(4-8%), seed orders flow every day again -- the 14th attempt's original goal,
+finally achieved cleanly, `next/decision_price` ratio flat (~1.00, ruling out
+the 1st-5th attempts' within-order price-walk mechanism).
+
+**It still regressed, badly, against reactive opponents specifically** (a
+20-seed check against `main_plant_priority_submitted_20260818.py`: baseline
+9/20 wins -> 0/20; a 10-seed check against `tape_kiro`: baseline 2/10 ->
+7/10, the *opposite* direction -- exactly this codebase's own documented
+`tape_kiro`-is-a-misleading-sentinel pattern, see the 16th attempt above).
+Root-caused via replay trajectory, not left as an unexplained regression: the
+freed market-order capacity let overall buying pace (land/seeds/hires)
+outrun this agent's fixed crew's actual tending throughput -- weed count
+climbed to 14-18/100 owned tiles in the back half of the game (vs. baseline's
+steady 2-4 in the same matchups) even though crop counts were often *higher*
+than baseline (seeds were being planted fine, just not watered in time
+afterward). `MAX_HANDS` 12->14 was re-tested in this new context (a narrower
+version of this exact pairing was tried once before per the 17th attempt's
+own paired retest and scored 1.7%, but never actually exercised the tier it
+targets) -- still worse, not better (`tape_kiro` seed check $22,084->$8,788;
+sentinel money down in all 5 seeds tested, one collapsing to $2,095): the
+extra hires' fib-priced cost drained cash without fixing the weed count
+(still 17/100). Reverted `MAX_HANDS` back to 12. `WHEAT_SELL_RESERVE_DAYS`
+was also re-tested at 1 instead of 3 (X594's own value): mixed per-seed,
+aggregate slightly worse -- reserve sizing isn't the driver either. **Kept
+in the codebase, unreverted, per explicit user direction to investigate
+rather than revert on a partial (5-20 seed) validation** -- this is a live,
+open thread, not a settled kept-or-reverted attempt like the 12th/15th/16th;
+see this project's session memory and `.omc/plans/ralplan-wheat-feed-
+consolidation.md` for the complete validation log before touching this area
+again.
+
+**Routing efficiency, following directly from the weed-neglect diagnosis
+above.** An action-mix trace (fraction of unit-turns spent on WORK vs. MOVE
+vs. PASS) proved the crew is at 0% idle and doing *more* raw work than
+baseline (52% vs. baseline's 41-47%) once the 18th attempt's slots are free
+-- ruling out a misallocation/priority-reordering explanation (there's no
+idle capacity to reallocate) and confirming a pure walk-distance throughput
+ceiling: roughly half of every unit-turn was spent walking, not acting, in
+both baseline and the 18th-attempt state.
+
+A first fix, a per-hand territory-anchor spatial bias
+(`ANCHOR_W`/`_compute_anchors`, extending the same "bias `sort_dist`, never
+priority" pattern `_quadrant_utilization` already used for fresh plantings,
+mirroring the X594 kernel-pull reference's own anchor idea), was implemented,
+measured as a real but noisy, non-robust effect (5-seed sample: 3 of 5 seeds
+improved substantially, 2 regressed hard; a proper 20-seed sample showed
+0/20 wins against the reactive sentinel, no better than no anchor at all;
+anchor drift itself was ruled out as the noise source via a dedicated
+turn-to-turn stability trace -- anchors were stable, 0.18 tiles mean drift,
+in both a badly-regressed and a much-improved seed), and **removed** once a
+fuller mechanism replaced it (see below) -- this is the "isolate one change"
+methodology applied to a mechanism, not just a constant: don't keep two
+untested routing changes live simultaneously.
+
+**Replaced with a full global (unit x job) assignment**
+(`_build_tile_jobs`/`_assign_tile_jobs`), reusing this agent's existing
+`(priority, sort_dist)` scoring convention exactly (no new scalar formula,
+avoiding a `TIER_GAP`-style recalibration risk) rather than X594's own scored
+formula. Tile-only candidates (harvest/water/weed/animal-upkeep/plant/build
+-- any unit could do any of these) are built once per turn instead of every
+unit rescanning the whole board and claiming its own single best candidate
+in a fixed, order-dependent sequence; inventory-dependent candidates (feed/
+fertilizer-delivery/animal-token-placement/shed-return -- see
+`_find_personal_target`) stay genuinely per-unit, since they can't be pooled,
+but now compete fairly in the *same* sort as pool jobs rather than
+automatically winning outright (a real bug in this rework's own first
+version, caught by `test_find_target_shed_return_stays_routine_below_the_
+carry_threshold` -- a routine, low-priority personal candidate like a small
+carried load's shed return must still be able to lose to a genuinely more
+urgent nearby pool job). Mechanism trace confirmed a real, robust efficiency
+gain this time, unlike the anchor bias: work% rose from ~52% to 58%, not
+just in one lucky seed. Money followed: a 20-seed check against the reactive
+sentinel landed at 944,799 total (vs. baseline's 993,583, only -4.9% --
+closest of any variant tried this session, vs. the anchor bias's -12.4% or
+the 18th attempt alone's -42.5%), several previously-blowout seeds now close
+losses instead of routs.
+
+**Kept -- but win rate against the reactive sentinel is still a near-total
+collapse (1/20), despite the crew being measurably, robustly more
+efficient.** Three independent, real efficiency improvements this session
+(the 14th WHEAT attempt's slot-freeing, the anchor bias, the global
+assignment) have each made this agent demonstrably better at working the
+map, and none of them meaningfully closed this specific gap -- strong
+evidence the bottleneck was never really about routing at all: it's some
+other effect the 18th attempt's WHEAT-reserve change specifically triggers
+against reactive opponents (most likely a shared-market-price mechanism, the
+closest precedent being the 14th attempt's own animal-byproduct spillover
+finding). Any future attempt in this specific area should start from that
+reframing, not from another routing or crew-capacity lever -- both of those
+avenues are now reasonably well-explored for this cycle. Full validation
+log: `.omc/plans/ralplan-routing-efficiency.md` and
+`.omc/plans/ralplan-global-assignment-v2.md`.
 """
 
 from __future__ import annotations
@@ -1034,7 +1142,7 @@ HARVEST_AT_RISK_DIST_BIAS = 1000  # subtracted from a harvestable tile's sort_di
     # tile is always served before a merely-closer one still within priority 0. See the module
     # docstring's Harvest-ready tiles rotting to weeds note.
 WHEAT_SHED_RETURN_THRESHOLD = 5  # minimum carried WHEAT before it's worth a dedicated trip to
-    # the shed (_find_target) or before it's eligible to DROP once already there
+    # the shed (_find_personal_target) or before it's eligible to DROP once already there
     # (_decide_unit) -- 12th market-order-slot-starvation attempt. Must exceed the 4-unit cap
     # on a feed PICKUP (see _decide_unit's own PICKUP WHEAT call) or a freshly-picked-up
     # feed batch would immediately qualify for DROP and livelock right back into the shed
@@ -1058,7 +1166,12 @@ FERTILIZER_STOCKPILE_RESERVE = 10  # reserve target while price is cheap -- see 
 FERTILIZER_CHEAP_PRICE_FRAC = 0.35  # price <= this fraction of base triggers stockpiling.
                                      # Deliberately well below SELL_PARAMS["FERTILIZER"]'s own
                                      # 0.50 sell threshold -- see the same docstring note
-FERTILIZER_MAX_PRICE_FRAC = 1.2  # don't buy fertilizer more than 20% over base
+FERTILIZER_MAX_PRICE_FRAC = 1.147  # don't buy fertilizer more than ~15% over base --
+                                    # was 1.2; MC search (2026-08-20, scripts/mc_search.py,
+                                    # paired jointly with SAFETY_RESERVE/SHED_OVERFLOW_GUARD)
+                                    # found this, validated at full-pool 30-seed A/B: 71.9%->
+                                    # 74.8% win rate, +$1.2-1.5k mean margin, improves on both
+                                    # reactive self-play sentinels, regresses nowhere
 
 SELL_PARAMS = {
     # threshold: fraction of base price required to sell at all -- see
@@ -1081,7 +1194,8 @@ SELL_PARAMS = {
 }
 
 SHED_CAPACITY = 100  # data/README.md default; not exposed in `obs`
-SHED_OVERFLOW_GUARD = 0.85  # start dumping regardless of price above this fraction full
+SHED_OVERFLOW_GUARD = 0.72  # start dumping regardless of price above this fraction full --
+                             # was 0.85; see FERTILIZER_MAX_PRICE_FRAC's note, same MC search
 
 ANIMAL_KINDS = ("COW", "SHEEP", "GOOSE")
 ANIMAL_PRODUCT = {"COW": "MILK", "SHEEP": "WOOL", "GOOSE": "EGG"}
@@ -1111,6 +1225,22 @@ FEED_MAX_PRICE_FRAC = 5.0  # a near-nonbinding backstop, not a real cap: missing
                             # inflated wheat price -- see the module docstring's WHEAT
                             # sell/rebuy round trip note for why a tighter cap is a trap
                             # (below ~1.4x base, animals starve outright in testing)
+WHEAT_SELL_RESERVE_DAYS = 3  # 18th market-order-slot-starvation attempt (see the module
+                              # docstring and .omc/plans/ralplan-wheat-feed-consolidation.md):
+                              # _build_sell_orders holds back live_animals * min(this,
+                              # days_remaining) WHEAT from the sell dump instead of always
+                              # dumping the full shed -- mirrors the X594 kernel-pull
+                              # reference's own reserve shape, tried here for the first time
+                              # paired with _build_feed_orders' carried-inclusive/consolidated
+                              # change below rather than alone (three earlier flat-reserve-
+                              # alone attempts all regressed, see the module docstring).
+                              # Re-tested at 1 (critic-pass suggestion, cheaper than a routing
+                              # rework): mixed per-seed (2 of 5 sentinel seeds improved, 2
+                              # worsened, 1 flat), aggregate total across the same 5 seeds
+                              # slightly *worse* (151,526 vs. 146,914) -- confirms reserve
+                              # sizing isn't the regression's primary driver (both are ~40%
+                              # below baseline's 255,367 either way). Reverted to 3, the
+                              # ground-truthed X594 value, since no deviation from it helps.
 
 FARM_HAND_COST_MULT = 1  # data/README.md default; mirrors kaggriculture.py's own constant,
                           # used only to estimate HIRE's own same-turn cash draw -- see
@@ -1124,8 +1254,23 @@ MAX_HANDS = 12  # was 6, briefly 8; see the module docstring's Land / hands note
                 # `2 * quadrants` formula's pace. HANDS_BASE/HANDS_PER_QUADRANT/
                 # MAX_HANDS were picked so _hands_target(quadrants) tracks that curve
                 # (5/8/11/12 at 1-4 quadrants) while staying strictly increasing
-                # through all 4 quadrants, so _land_worth_buying never blocks the 4th
-SAFETY_RESERVE = 300  # cash kept in reserve before optional buys/land/fertilizer
+                # through all 4 quadrants, so _land_worth_buying never blocks the 4th.
+                # RE-TESTED at 14 (18th attempt, step 2 -- see .omc/plans/ralplan-wheat-feed-
+                # consolidation.md) specifically to check whether pairing it with the sell-
+                # side WHEAT reserve (unlike the original 17th-attempt pairing, which had no
+                # sell-side reserve and never actually exercised the 4-quadrant tier) changed
+                # the outcome. It didn't: worse across the board (tape_kiro $22,084->$8,788;
+                # reactive sentinel 5-seed money down in all 5, one seed collapsing to
+                # $2,095) -- and a trajectory trace showed why it's the wrong lever, not just
+                # a worse one: weed count with 14 hands still hit 17/100 tiles by day 26,
+                # essentially unchanged from 12 hands' own 10-18 -- the extra hires' cost
+                # (fib-priced, steep at this count) ate cash during an already tight stretch
+                # without meaningfully improving tending throughput. Reverted to 12. The
+                # underlying weed-neglect problem this was meant to fix is real (see the
+                # plan's validation-result section) but isn't a headcount problem -- next
+                # candidate is the assignment/routing logic itself, not crew size.
+SAFETY_RESERVE = 147  # cash kept in reserve before optional buys/land/fertilizer -- was
+                       # 300; see FERTILIZER_MAX_PRICE_FRAC's note, same MC search
 MAX_MARKET_ORDERS = 10  # data/README.md default; not exposed in `obs`
 
 DEFAULT_EPISODE_STEPS = 720  # data/README.md defaults, used if `config` is unavailable
@@ -1486,122 +1631,51 @@ class _AnimalPlanner:
         return kind
 
 
-def _find_target(
-    pos, farm, day, board_size, claimed, inv, planner, animal_planner, shed_tiles,
-    want_fertilizer, shed_wheat_available, liquidating, animal_zone, quadrant_util,
-    plant_priority,
+def _find_personal_target(
+    pos, farm, day, board_size, claimed, inv, animal_planner, shed_tiles,
+    want_fertilizer, shed_wheat_available, liquidating,
 ):
-    """Scan the whole farm for the nearest (or, for a fresh planting,
-    nearest-adjusted-for-quadrant-balance -- see below) unclaimed tile worth
-    walking to, across both crops and animals -- one shared crew, one shared
-    priority order, so a unit works whichever is more urgent right now
-    instead of being permanently assigned to one or the other (see the
-    module docstring's Animals note).
+    """The subset of this agent's old single-scan target search that genuinely depends on
+    a *specific* unit's own carried inventory -- fertilizer-delivery, feed, animal-token
+    placement, and every shed-return variant -- rather than just tile state. These can't be
+    pooled into the shared per-turn job list `_build_tile_jobs` builds (see the module
+    docstring's Routing efficiency note): a fertilizer-delivery candidate, for instance, only
+    exists at all for a unit that is already carrying fertilizer. Every unit still checks
+    this first, exactly as before; only a unit this returns nothing for falls through to the
+    shared `_assign_tile_jobs` global match.
 
-    `liquidating` (close to the last day, see the module docstring's Endgame
-    liquidation note) swaps water's and shed-return's priority: watering a
-    crop that won't finish growing in time is wasted effort, while getting
-    already-harvested produce into the shed guarantees it can still be sold.
+    `liquidating` (close to the last day, see the module docstring's Endgame liquidation
+    note) swaps shed-return's priority the same way it always has.
 
-    A tile with `consecutive_unwatered >= 1` (kaggriculture.py: missing
-    water two days running turns a PLANT into a WEED, and a fresh planting
-    already starts pre-loaded at 1 -- "the planting day counts as
-    unwatered") is one miss away from being lost outright, so its water
-    candidate jumps to harvest's own priority (0) instead of the routine
-    `water_priority` -- see the module docstring's Neglected-tile urgency
-    note. This is what actually stops distant land from quietly losing
-    crops to neglect, not geography: a unit chasing marginally-closer
-    routine chores near the shed will still lose to a genuinely at-risk
-    tile regardless of how far away it is.
-
-    `plant_priority` (PLANT_PRIORITY or PLANT_PRIORITY_UNDER_GATE, chosen
-    once per turn in `agent()`) is the priority a fresh PLANT candidate
-    sorts at -- see the module docstring's Land / hands note: priority
-    strictly outranks distance in this function's sort
-    key, so at its baseline (4, below every maintenance chore except
-    routine water) a single turn with more outstanding water/harvest/weed/
-    animal-care work than there are units leaves *zero* units ever reaching
-    a PLANT candidate, no matter how many empty tiles sit right next to
-    them.
-
-    Every candidate carries a precomputed `sort_dist` (its 4th field) rather
-    than the sort key recomputing raw distance uniformly: a fresh PLANT
-    candidate gets its raw distance inflated by how utilized its quadrant
-    already is (`quadrant_util`), nudging new plantings toward whichever
-    quadrant is most neglected instead of always the literal nearest empty
-    tile -- see the module docstring's Land / hands note. Every
-    other candidate type keeps plain, unadjusted distance.
-    """
+    Short-circuits before any board scan (no candidates possible) unless this unit is
+    carrying fertilizer, wheat, or an animal token -- cheaper than the old design, which
+    always scanned regardless."""
     fx, fy = pos
-    water_priority = 5 if liquidating else 1
     shed_priority = 1 if liquidating else 5
-    # 15th market-order-slot-starvation attempt: collect-fertilizer/care used to sort at a
-    # flat 3, comfortably below PLANT_PRIORITY (4) but strictly above PLANT_PRIORITY_UNDER_GATE
-    # (1.5) -- so once the 14th attempt's feed-order fix let seed orders flow again, a fresh
-    # PLANT candidate under the gate started systematically outranking animal upkeep instead of
-    # losing to it, quietly pulling crew-turns off COLLECT_FERTILIZER/CARE toward planting. That
-    # crew-time diversion is the mechanism traced behind the 14th attempt's MILK/WOOL/FERTILIZER
-    # price spillover -- see the module docstring. Flooring animal upkeep's own priority at
-    # plant_priority keeps it tied (broken by distance) with PLANT under the gate instead of
-    # losing outright, while leaving it untouched (still 3, still below PLANT_PRIORITY's 4) once
-    # the gate isn't active -- matching the pre-14th baseline exactly in the ungated regime.
-    animal_upkeep_priority = min(3, plant_priority)
-    spread_penalty = board_size // 2  # scale of the quadrant-balance nudge, in tiles
+    carries_fertilizer = inv.get("FERTILIZER", 0) > 0
+    carries_wheat = inv.get("WHEAT", 0) > 0
+    carries_animal_token = any(inv.get(k, 0) > 0 for k in ANIMAL_KINDS)
     candidates = []
-    any_unfed = False
-    for y in range(board_size):
-        for x in range(board_size):
-            if (x, y) in claimed:
-                continue
-            tile = farm["tiles"][y][x]
-            dist = abs(x - fx) + abs(y - fy)
-            if _is_plant(tile):
-                if _is_harvestable(tile, day):
-                    # A harvestable tile is still subject to the same 2-consecutive-miss WEED
-                    # conversion as an unharvested one (kaggriculture.py's daily refresh doesn't
-                    # exempt mature plants) -- harvesting it removes the risk outright, so an
-                    # about-to-expire ripe tile needs to be reached before a merely-closer one
-                    # that has more slack. Priority stays 0 either way (already top tier); the
-                    # bias only breaks ties within it. See the module docstring's Harvest-ready
-                    # tiles rotting to weeds note.
-                    at_risk = not liquidating and tile.get("consecutive_unwatered", 0) >= 1
-                    sort_dist = dist - HARVEST_AT_RISK_DIST_BIAS if at_risk else dist
-                    candidates.append((x, y, 0, sort_dist))  # harvest
-                elif not tile["watered_today"]:
-                    at_risk = not liquidating and tile.get("consecutive_unwatered", 0) >= 1
-                    # 0.5: below harvest (0, already-earned money, never worth delaying for
-                    # a tile that would merely avoid a future loss) but above every routine
-                    # chore, including normal watering
-                    candidates.append((x, y, 0.5 if at_risk else water_priority, dist))  # water
-                elif inv.get("FERTILIZER", 0) > 0 and _is_fertilizable(tile, day):
-                    candidates.append((x, y, 3, dist))  # deliver fertilizer
-            elif _is_weed(tile):
-                candidates.append((x, y, 2, dist))  # clear a weed to reclaim the tile
-            elif _is_animal_tile(tile):
-                if tile.get("yield_units", 0) > 0:
-                    candidates.append((x, y, 0, dist))  # harvest animal product
-                elif not tile.get("fed_today"):
-                    any_unfed = True
-                    if inv.get("WHEAT", 0) > 0:
-                        candidates.append((x, y, -1, dist))  # feed -- more urgent than
-                                                               # anything; 2 misses = the
-                                                               # animal escapes
-                elif tile.get("fertilizer_available"):
-                    candidates.append((x, y, animal_upkeep_priority, dist))  # collect fertilizer
-                elif not tile.get("cared_today"):
-                    candidates.append((x, y, animal_upkeep_priority, dist))  # care (free next-yield bonus)
-            elif _is_empty_structure(tile) and _carried_animal_for(tile, inv):
-                candidates.append((x, y, 0, dist))  # place a carried animal -- don't leave it idle
-            elif tile is None:
-                if (x, y) in animal_zone:
-                    candidates.append((x, y, 4, dist))  # reserved for an animal structure
-                elif planner.has_plantable():
-                    q = _quadrant_of(x, y, board_size)
-                    candidates.append(
-                        (x, y, plant_priority, dist + quadrant_util[q] * spread_penalty)
-                    )  # plant
-                elif animal_planner.wants_structure():
-                    candidates.append((x, y, 4, dist))  # build a structure (overflow beyond the zone)
+    if carries_fertilizer or carries_wheat or carries_animal_token:
+        for y in range(board_size):
+            for x in range(board_size):
+                if (x, y) in claimed:
+                    continue
+                tile = farm["tiles"][y][x]
+                dist = abs(x - fx) + abs(y - fy)
+                if _is_plant(tile):
+                    # matches _find_target's old elif chain: only reachable once the tile is
+                    # neither harvestable nor unwatered (those are tile-only, in the shared pool)
+                    if (carries_fertilizer and tile.get("watered_today")
+                            and not _is_harvestable(tile, day) and _is_fertilizable(tile, day)):
+                        candidates.append((x, y, 3, dist))  # deliver fertilizer
+                elif _is_animal_tile(tile):
+                    # same elif-chain fidelity: FEED only applies once yield_units<=0 (a
+                    # ready product is tile-only harvest, handled by the shared pool instead)
+                    if carries_wheat and tile.get("yield_units", 0) <= 0 and not tile.get("fed_today"):
+                        candidates.append((x, y, -1, dist))  # feed -- 2 misses = the animal escapes
+                elif carries_animal_token and _is_empty_structure(tile) and _carried_animal_for(tile, inv):
+                    candidates.append((x, y, 0, dist))  # place a carried animal
 
     carried_produce_total = sum(
         n for k, n in inv.items()
@@ -1609,25 +1683,13 @@ def _find_target(
     )
     carrying_produce = carried_produce_total > 0
     needs_fertilizer = inv.get("FERTILIZER", 0) == 0 and want_fertilizer and not liquidating
-    needs_wheat = inv.get("WHEAT", 0) <= 0 and any_unfed and shed_wheat_available
-    needs_animal_pickup = animal_planner.wants_pickup() and not any(inv.get(k, 0) > 0 for k in ANIMAL_KINDS)
+    needs_wheat = inv.get("WHEAT", 0) <= 0 and _any_unfed_animal(farm) and shed_wheat_available
+    needs_animal_pickup = animal_planner.wants_pickup() and not carries_animal_token
     # A large carried WHEAT batch is worth a dedicated trip too (12th market-order-slot-
     # starvation attempt -- see the module docstring), but deliberately kept out of
-    # carried_produce_total/the urgent-priority check above: the 11th attempt counted every
-    # carried WHEAT unit there and caused a weed-count explosion (8->34/75 tiles), because
-    # WHEAT's fast, frequent, single-shot harvests trivially cross CARRIED_PRODUCE_URGENT_
-    # THRESHOLD on their own, putting a routine WHEAT carry in direct priority competition
-    # with weeding every time. Gating on a WHEAT-specific minimum (bigger than a typical
-    # partial harvest) and always at routine shed_priority, never urgent, avoids both
-    # failure modes: small/frequent carries generate no trip at all, and even a big one
-    # never outranks weeding/watering.
-    # Deliberately NOT extended with `or liquidating` for a below-threshold batch: measured (see
-    # the module docstring's Endgame liquidation (WHEAT) note) -- a dedicated trip here reuses
-    # `shed_priority`, tuned for FERTILIZER's rarer, larger liquidation returns, and firing it for
-    # nearly every unit's small stray WHEAT (routine feed PICKUPs leave sub-threshold leftovers
-    # constantly) crowded out higher-value final-day work for a net loss. `_decide_unit`'s DROP
-    # gate still gets the liquidating escape below, so a unit already at the shed for another
-    # reason still drops it -- just never a trip dedicated to it alone.
+    # carried_produce_total/the urgent-priority check above -- see that attempt's note for why
+    # (WHEAT's fast, frequent, single-shot harvests trivially cross CARRIED_PRODUCE_URGENT_
+    # THRESHOLD on their own, colliding with weeding every time if counted there).
     returning_wheat = inv.get("WHEAT", 0) >= WHEAT_SHED_RETURN_THRESHOLD
     if carrying_produce or needs_fertilizer or needs_wheat or needs_animal_pickup or returning_wheat:
         if needs_wheat:
@@ -1646,14 +1708,141 @@ def _find_target(
     return candidates[0]
 
 
+def _build_tile_jobs(farm, day, board_size, claimed, animal_zone, quadrant_util, plant_priority, liquidating, planner, animal_planner):
+    """The unit-independent subset of this agent's old single-scan target search --
+    harvest/water/weed/animal-upkeep/plant/build -- any unit could do any of these
+    regardless of what it's carrying, so they're built once per turn here instead of every
+    unit rescanning the whole board and claiming its own single best candidate in a fixed,
+    order-dependent sequence. `_assign_tile_jobs` then matches all of this turn's
+    still-unresolved units against this shared pool globally. See the module docstring's
+    Routing efficiency note, and `_find_personal_target` for the (smaller) unit-dependent
+    remainder this doesn't cover.
+
+    Every job carries a `(x, y, priority, dist_bias)` tuple: `dist_bias` is added to
+    whichever unit ends up scored against it (Manhattan distance from that unit's own
+    position), preserving every existing sort_dist adjustment exactly --
+    `HARVEST_AT_RISK_DIST_BIAS` and the quadrant-balance nudge for fresh plantings -- since
+    neither of those depends on which unit is asking, just tile state."""
+    water_priority = 5 if liquidating else 1
+    # 15th market-order-slot-starvation attempt: see the module docstring for why animal
+    # upkeep floors at plant_priority instead of a flat 3 -- unchanged by this refactor.
+    animal_upkeep_priority = min(3, plant_priority)
+    spread_penalty = board_size // 2  # scale of the quadrant-balance nudge, in tiles
+    jobs = []
+    for y in range(board_size):
+        for x in range(board_size):
+            if (x, y) in claimed:
+                continue
+            tile = farm["tiles"][y][x]
+            if _is_plant(tile):
+                if _is_harvestable(tile, day):
+                    # See the module docstring's Harvest-ready tiles rotting to weeds note:
+                    # priority stays 0 either way (already top tier); the bias only breaks
+                    # ties within it, favoring a tile one missed watering from becoming a WEED.
+                    at_risk = not liquidating and tile.get("consecutive_unwatered", 0) >= 1
+                    jobs.append((x, y, 0, -HARVEST_AT_RISK_DIST_BIAS if at_risk else 0))  # harvest
+                elif not tile["watered_today"]:
+                    at_risk = not liquidating and tile.get("consecutive_unwatered", 0) >= 1
+                    jobs.append((x, y, 0.5 if at_risk else water_priority, 0))  # water
+            elif _is_weed(tile):
+                jobs.append((x, y, 2, 0))  # clear a weed to reclaim the tile
+            elif _is_animal_tile(tile):
+                if tile.get("yield_units", 0) > 0:
+                    jobs.append((x, y, 0, 0))  # harvest animal product
+                elif tile.get("fed_today"):
+                    # matches the old elif chain: collect/care only apply once fed (an unfed
+                    # animal's FEED candidate is unit-dependent, see _find_personal_target)
+                    if tile.get("fertilizer_available"):
+                        jobs.append((x, y, animal_upkeep_priority, 0))  # collect fertilizer
+                    elif not tile.get("cared_today"):
+                        jobs.append((x, y, animal_upkeep_priority, 0))  # care (free next-yield bonus)
+            elif tile is None:
+                if (x, y) in animal_zone:
+                    jobs.append((x, y, 4, 0))  # reserved for an animal structure
+                elif planner.has_plantable():
+                    q = _quadrant_of(x, y, board_size)
+                    jobs.append((x, y, plant_priority, quadrant_util[q] * spread_penalty))  # plant
+                elif animal_planner.wants_structure():
+                    jobs.append((x, y, 4, 0))  # build a structure (overflow beyond the zone)
+    return jobs
+
+
+def _assign_tile_jobs(units, jobs, personal):
+    """Global (unit x job) match for `_build_tile_jobs`'s shared pool, plus each unit's own
+    personal (inventory-dependent) candidate from `_find_personal_target` if it has one --
+    both compete in the SAME sort, by the exact same `(priority, sort_dist)` convention this
+    agent has always used (priority strictly dominates distance). Every pairing across the
+    whole remaining crew, and every unit's own personal option, is compared before any of
+    them commit; assignment is greedy top-down, removing a shared job once any unit takes
+    it (a personal candidate is never contested -- it only exists for the one unit whose
+    inventory generated it, so taking it never blocks another unit).
+
+    A first version of this rework let a found personal target win outright, before this
+    unified sort existed -- wrong, see `_decide_unit`'s own docstring and
+    `test_find_target_shed_return_stays_routine_below_the_carry_threshold`: a routine,
+    low-priority personal candidate (e.g. a small carried load's shed return) must still be
+    able to lose to a genuinely more urgent nearby pool job, exactly as the old single-scan
+    design compared them. This is the one piece of this turn's routing that differs from
+    that old per-unit sequential scan: instead of unit 0 claiming its own single best
+    candidate before unit 1 even looks at the board (an order-dependent match that can
+    strand a *different* unit's better fit), every candidate across the whole remaining crew
+    is compared at once. See the module docstring's Routing efficiency note.
+
+    `units` is a list of `(unit_index, pos)` for units not yet resolved by an on-tile
+    action. `personal` is `{unit_index: (x, y, priority, dist)}`, one entry for units
+    `_find_personal_target` found something for. Returns `{unit_index: (x, y)}` for however
+    many could be matched -- a unit with no personal candidate and no reachable pool job is
+    simply absent from the result (callers should PASS it)."""
+    pairs = []
+    for i, pos in units:
+        fx, fy = pos
+        for j, (x, y, prio, bias) in enumerate(jobs):
+            dist = abs(x - fx) + abs(y - fy) + bias
+            pairs.append((prio, dist, i, j))
+        pc = personal.get(i)
+        if pc is not None:
+            pairs.append((pc[2], pc[3], i, None))
+    pairs.sort(key=lambda pair: (pair[0], pair[1]))
+    assigned_units = set()
+    assigned_jobs = set()
+    result = {}
+    n_units = len(units)
+    for prio, dist, i, j in pairs:
+        if i in assigned_units:
+            continue
+        if j is None:
+            x, y = personal[i][0], personal[i][1]
+        else:
+            if j in assigned_jobs:
+                continue
+            x, y = jobs[j][0], jobs[j][1]
+            assigned_jobs.add(j)
+        result[i] = (x, y)
+        assigned_units.add(i)
+        if len(assigned_units) == n_units:
+            break
+    return result
+
+
 def _build_action(kind):
     return ["BUILD_COOP" if ANIMAL_STRUCTURE[kind] == "COOP" else "BUILD_PASTURE"]
 
 
 def _decide_unit(
-    pos, inv, farm, private, day, board_size, claimed, planner, animal_planner, shed_tiles,
-    want_fertilizer, liquidating, animal_zone, quadrant_util, plant_priority,
+    pos, inv, farm, private, day, claimed, planner, animal_planner, shed_tiles,
+    want_fertilizer, liquidating, animal_zone,
 ):
+    """Resolves a unit's action if it's standing on an actionable tile -- unconditionally
+    the best use of this turn (it costs no travel), so nothing else is even considered, same
+    as before this file's routing-efficiency rework. Returns `None` otherwise, meaning the
+    caller (`agent()`) still needs this unit's personal (inventory-dependent) candidate --
+    see `_find_personal_target` -- and a shared tile-job match -- see `_build_tile_jobs`/
+    `_assign_tile_jobs` and the module docstring's Routing efficiency note -- to decide where
+    it walks. (Earlier versions of this rework let a found personal target win outright over
+    the shared pool; that's wrong -- a routine, low-priority personal candidate like a small
+    carried load's shed return must still be able to lose to a genuinely more urgent nearby
+    pool job, exactly as the old single-scan design did. See
+    `test_find_target_shed_return_stays_routine_below_the_carry_threshold`.)"""
     fx, fy = pos
     tile = farm["tiles"][fy][fx]
 
@@ -1756,21 +1945,10 @@ def _decide_unit(
             claimed.add((fx, fy))
             return _build_action(kind)
 
-    shed_wheat_available = private["shed"].get("WHEAT", 0) > 0
-    target = _find_target(
-        pos, farm, day, board_size, claimed, inv, planner, animal_planner, shed_tiles,
-        want_fertilizer, shed_wheat_available, liquidating, animal_zone, quadrant_util,
-        plant_priority,
-    )
-    if target:
-        claimed.add((target[0], target[1]))
-        step = _step_toward(fx, fy, target[0], target[1])
-        if step:
-            return [step]
-    return ["PASS"]
+    return None  # not on an actionable tile -- agent() resolves this unit's target itself
 
 
-def _build_sell_orders(shed, prices, days_remaining):
+def _build_sell_orders(shed, prices, days_remaining, farm):
     """Dumps the entire shed stock of a crop in one order once its price
     threshold is met -- same behavior as melon_maxxer, deliberately reverted
     from an earlier version that capped units sold per turn (see the module
@@ -1781,17 +1959,39 @@ def _build_sell_orders(shed, prices, days_remaining):
     shed waiting for the cap to free up slows reinvestment into land/seeds/
     hands more than an occasional price dip costs, at this agent's actual
     production scale. See the module docstring's WHEAT sell/rebuy round trip
-    note for a second, more targeted attempt at holding back WHEAT specifically
-    (for animal feed) that hit the same wall for the same underlying reason.
+    note for three earlier, narrower attempts at holding back WHEAT alone
+    (for animal feed) that all hit the same standing-price wall.
+
+    **18th attempt (see .omc/plans/ralplan-wheat-feed-consolidation.md):
+    WHEAT specifically holds back `live_animals * min(WHEAT_SELL_RESERVE_DAYS,
+    days_remaining)` from the dump, unless the shed is crowded or the game is
+    liquidating (both force a full dump regardless, same as every other
+    crop).** The three prior WHEAT-reserve attempts (module docstring) tried
+    this shape alone, on top of an unchanged `_build_feed_orders` that still
+    bought one order per unit of shortfall from `shed`-only accounting -- this
+    time it's paired with `_build_feed_orders`'s own carried-inclusive,
+    single-order change below, mirroring the X594 kernel-pull reference's
+    combination rather than retrying a piece already shown to fail alone.
+    Status: unvalidated as of this commit -- pending the mechanism trace and
+    full 30-seed protocol the plan requires before this note can say kept or
+    reverted.
     """
     orders = []
     shed_total = sum(shed.values())
     crowded = shed_total >= SHED_CAPACITY * SHED_OVERFLOW_GUARD
     liquidating = days_remaining <= ENDGAME_LIQUIDATION_DAYS
+    live_animals = None
     for crop, params in SELL_PARAMS.items():
         qty = shed.get(crop, 0)
         if qty <= 0:
             continue
+        if crop == "WHEAT" and not (crowded or liquidating):
+            if live_animals is None:
+                live_animals = _live_animal_count(farm)
+            reserve = live_animals * min(WHEAT_SELL_RESERVE_DAYS, max(0, days_remaining))
+            qty -= reserve
+            if qty <= 0:
+                continue
         base = MARKET_PARAMS[crop]["base"]
         price = prices.get(crop, base)
         if crowded or liquidating or price >= base * params["threshold"]:
@@ -2021,43 +2221,38 @@ def _build_fertilizer_orders(private, prices, money, want_fertilizer):
 def _build_feed_orders(farm, private, prices, money):
     """Buy WHEAT directly from the market for animal feed, decoupled from
     the crop side's own WHEAT production/selling. Without this, animals
-    starve even with plenty of attention: `_build_sell_orders` dumps every
-    WHEAT harvest as soon as its price clears the sell threshold, so the
-    shed can sit at 0 WHEAT for turns at a stretch -- see the module
+    starve even with plenty of attention: `_build_sell_orders` used to dump
+    every WHEAT harvest as soon as its price cleared the sell threshold, so
+    the shed could sit at 0 WHEAT for turns at a stretch -- see the module
     docstring's WHEAT sell/rebuy round trip note. Placed ahead of
     `_build_seed_orders` in `agent()`'s market list: missing a seed buy
     delays a planting one turn, missing a feed loses the whole animal.
 
-    Don't retry giving `_build_seed_orders` priority over this -- by a hard
-    per-turn cap on feed, by reordering the list, or by shrinking
-    `FEED_RESERVE_PER_ANIMAL`/consolidating into one order -- without new
-    evidence. See the module docstring's Market-order-slot starvation note,
-    7th/8th/9th attempts. The 15th attempt re-tried the 14th's
-    volume-preserving consolidation here, this time paired with an
-    animal-care priority floor (see _find_target's `animal_upkeep_priority`)
-    meant to hold this agent's own MILK/WOOL/FERTILIZER supply steady -- the
-    floor alone is kept (see the module docstring), but consolidating this
-    function specifically still regressed exactly as before even paired with
-    it, so this function itself stays in the original per-unit form.
-
-    **`have` deliberately counts only the shed, even though that double-buys
-    WHEAT the farm already owns (17th attempt, reverted).** Feed WHEAT is
-    consumed out of a *unit's* inventory (`FEED` reads `inv["WHEAT"]`;
-    `_decide_unit` PICKUPs up to 4 at a time), so that's where it piles up,
-    invisible here -- unlike `_build_fertilizer_orders`, whose own `have`
-    correctly sums shed + `private["inventories"]`. Summing them here too
-    was tried and measured; it works mechanically and loses badly anyway.
-    See the module docstring's Carried-stock accounting note for the full
-    numbers. Short version: WHEAT market throughput is this agent's single
-    largest profit centre (net +$35k of a $57k final on a traced game, more
-    than animals and every other crop combined), and it flows *through* this
-    over-buying -- cutting feed purchases 84% cut WHEAT sales 70% with them.
-    Don't "fix" this without a plan for replacing that revenue."""
+    **18th attempt (see .omc/plans/ralplan-wheat-feed-consolidation.md):
+    `have` now sums shed + every unit's carried inventory, and the whole
+    shortfall is requested as ONE consolidated order, not one order per unit
+    of shortfall.** Both of these were tried alone before and reverted --
+    carried-inclusive accounting alone (17th attempt) cut WHEAT sales 70%
+    along with the purchases, because WHEAT throughput is this agent's
+    single largest profit centre (net +$35k of a $57k final) and nothing
+    replaced it; consolidation alone (9th/14th/15th attempts) hit a
+    standing-price or animal-byproduct-market-spillover wall instead. This
+    time both changes are paired with `_build_sell_orders`'s own new WHEAT
+    reserve (see `WHEAT_SELL_RESERVE_DAYS`) rather than retrying either piece
+    on top of an unchanged sell side that still dumps the shed to zero --
+    mirroring the X594 kernel-pull reference's combination, ground-truthed
+    against its actual per-turn order output rather than inferred. Status:
+    unvalidated as of this commit -- pending the mechanism trace and full
+    30-seed protocol the plan requires before this note can say kept or
+    reverted. Don't re-derive `have`/order-shape from scratch without reading
+    the plan and the module docstring's 9th/14th/15th/17th attempts first."""
     live = _live_animal_count(farm)
     if live == 0:
         return []
     reserve = live * FEED_RESERVE_PER_ANIMAL
-    have = private.get("shed", {}).get("WHEAT", 0)
+    shed_wheat = private.get("shed", {}).get("WHEAT", 0)
+    carried_wheat = sum(inv.get("WHEAT", 0) for inv in private.get("inventories", []))
+    have = shed_wheat + carried_wheat
     needed = reserve - have
     if needed <= 0:
         return []
@@ -2066,12 +2261,11 @@ def _build_feed_orders(farm, private, prices, money):
     if price > base * FEED_MAX_PRICE_FRAC:
         return []
     remaining = money - SAFETY_RESERVE
-    orders = []
-    while needed > 0 and remaining >= price:
-        orders.append(["BUY_PRODUCT", "WHEAT", 1])
-        remaining -= price
-        needed -= 1
-    return orders
+    affordable = int(remaining // price) if price > 0 else 0
+    qty = min(needed, max(0, affordable))
+    if qty <= 0:
+        return []
+    return [["BUY_PRODUCT", "WHEAT", qty]]
 
 
 def _build_animal_orders(farm, private, money):
@@ -2218,16 +2412,27 @@ def agent(obs, config=None):
         PLANT_PRIORITY_UNDER_GATE if _land_utilization(farm) < LAND_UTILIZATION_GATE else PLANT_PRIORITY
     )
 
+    # Routing efficiency (see the module docstring's own note and
+    # .omc/plans/ralplan-global-assignment-v2.md): three passes instead of one single
+    # per-unit scan. Pass 1 resolves each unit exactly as before for on-tile actions --
+    # _decide_unit returns None for any unit not standing on an actionable tile. Pass 2
+    # computes each remaining unit's own personal (inventory-dependent) candidate, if it has
+    # one (_find_personal_target). Pass 3 matches every remaining unit against ONE shared
+    # tile-only job pool (_build_tile_jobs) *and* each unit's own personal candidate
+    # together, in one global sort (_assign_tile_jobs) -- instead of each unit re-scanning
+    # the whole board and claiming its own single best candidate in a fixed, order-dependent
+    # sequence.
     claimed = set()
     units = [farm["farmer"]] + list(farm["hands"])
-    actions = [
-        _decide_unit(
+    actions = [None] * len(units)
+    pending = []
+    for i, pos in enumerate(units):
+        result = _decide_unit(
             pos,
             inventories[i] if i < len(inventories) else {},
             farm,
             private,
             day,
-            board_size,
             claimed,
             planner,
             animal_planner,
@@ -2235,11 +2440,45 @@ def agent(obs, config=None):
             want_fertilizer,
             liquidating,
             animal_zone,
-            quadrant_util,
-            plant_priority,
         )
-        for i, pos in enumerate(units)
-    ]
+        if result is None:
+            pending.append((i, pos))
+        else:
+            actions[i] = result
+
+    if pending:
+        shed_wheat_available = shed.get("WHEAT", 0) > 0
+        personal = {}
+        for i, pos in pending:
+            p = _find_personal_target(
+                pos, farm, day, board_size, claimed,
+                inventories[i] if i < len(inventories) else {},
+                animal_planner, shed_tiles, want_fertilizer, shed_wheat_available, liquidating,
+            )
+            if p is not None:
+                personal[i] = p
+                # Provisionally reserve the tile so a later pending unit's own personal
+                # search (or the shared pool built below) doesn't also aim at it -- mirrors
+                # the old sequential design's incremental `claimed` updates. _assign_tile_jobs
+                # may still give this unit a different (pool) target instead; the reservation
+                # errs toward avoiding a double-dispatch collision over squeezing out every
+                # last bit of value from a tile that ends up unused this turn.
+                claimed.add((p[0], p[1]))
+        jobs = _build_tile_jobs(
+            farm, day, board_size, claimed, animal_zone, quadrant_util, plant_priority,
+            liquidating, planner, animal_planner,
+        )
+        assignment = _assign_tile_jobs(pending, jobs, personal) if (jobs or personal) else {}
+        for i, pos in pending:
+            fx, fy = pos
+            tx_ty = assignment.get(i)
+            if tx_ty is not None:
+                claimed.add(tx_ty)
+                step = _step_toward(fx, fy, tx_ty[0], tx_ty[1])
+                actions[i] = [step] if step else ["PASS"]
+            else:
+                actions[i] = ["PASS"]
+
     farmer_action, hands_actions = actions[0], actions[1:]
 
     # 16th market-order-slot-starvation attempt: cash_reserved tracks what earlier orders in
@@ -2249,7 +2488,7 @@ def agent(obs, config=None):
     # balance -- see _orders_cash_cost's own docstring and the module docstring's Same-turn cash
     # competition note.
     market = []
-    sell_orders = _build_sell_orders(shed, market_prices, days_remaining)
+    sell_orders = _build_sell_orders(shed, market_prices, days_remaining, farm)
     market += sell_orders
     cash_reserved = _orders_cash_cost(sell_orders, farm, market_prices)  # negative: SELL earns
 
