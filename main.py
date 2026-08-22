@@ -2590,12 +2590,38 @@ def _build_land_orders(farm, days_remaining, money):
     return []
 
 
-def _build_hire_orders(farm):
+def _build_hire_orders(farm, money_left):
+    """`money_left` is the caller's same-turn cash budget (see agent()'s own comment on why
+    hire runs before land in the build sequence) -- without this, this function requested
+    every hire up to the quadrant-based target regardless of affordability, relying entirely
+    on kaggriculture.py's own engine-side rejection (`_do_hire`: silently drops a HIRE order
+    once `farm["money"] < cost`, no other cap) to cap the real spend. That's harmless for
+    `cash_reserved`'s own purposes when every requested hire is genuinely affordable (the
+    common case, since a handful of hires costs relatively little even at the top of the
+    Fibonacci curve) -- but if money is already low enough that some would actually be
+    rejected, `_orders_cash_cost`'s HIRE branch (main.py) still charges the full Fibonacci cost
+    for every order in the *returned* list against this turn's cash_reserved tracker, since it
+    has no way to know which ones the engine will actually honor. That silently
+    under-estimates real money left for every builder after hire in agent()'s own sequence
+    (land/feed/seed/fertilizer), on exactly the days money is already tightest. Found via a
+    competitor's own analysis tooling (github.com/lopeznomar/kaggriculture-ops-lab) needing to
+    reconstruct HIRE cost as a residual against real money deltas, specifically because a
+    naive Fibonacci-sum overcounts whatever the engine actually rejected -- confirmed directly
+    against kaggriculture.py's `_do_hire` that affordability is the only rejection rule, then
+    checked whether this agent's own request-side already respected it (it didn't)."""
     desired = _hands_target(len(farm["unlocked_quadrants"]))
     remaining = desired - farm["hires_today"]
     if remaining <= 0:
         return []
-    return [["HIRE"] for _ in range(remaining)]
+    orders = []
+    budget = max(0, money_left)
+    for i in range(remaining):
+        cost = FARM_HAND_COST_MULT * _fib(farm["hires_today"] + i)
+        if budget < cost:
+            break
+        orders.append(["HIRE"])
+        budget -= cost
+    return orders
 
 
 def _build_seed_orders(seeds, money, days_remaining, prices):
@@ -2962,7 +2988,7 @@ def agent(obs, config=None):
     # into this turn's own SELL proceeds while land still ran first, so land won the race for
     # that cash against hire/seed instead of losing to their staleness the way it used to --
     # worse, not better. Hire claims its own real cost first now; land only sees what's left.
-    hire_orders = _build_hire_orders(farm)
+    hire_orders = _build_hire_orders(farm, farm["money"] - cash_reserved)
     market += hire_orders
     cash_reserved += _orders_cash_cost(hire_orders, farm, market_inventory)
 

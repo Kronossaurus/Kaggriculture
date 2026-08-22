@@ -387,6 +387,28 @@ def test_hands_target_uses_the_q1_override_only_at_one_quadrant():
     assert main._hands_target(3) == min(main.MAX_HANDS, main.HANDS_BASE + main.HANDS_PER_QUADRANT * 3)
 
 
+def test_build_hire_orders_requests_the_full_target_when_affordable():
+    """The common case: plenty of cash -- every hire up to the target gets requested,
+    same as before this function became money-aware."""
+    farm = _farm({})  # 1 quadrant -> desired = HANDS_TARGET_Q1
+    orders = main._build_hire_orders(farm, money_left=100000)
+    assert len(orders) == main.HANDS_TARGET_Q1
+    assert all(o == ["HIRE"] for o in orders)
+
+
+def test_build_hire_orders_stops_once_the_next_hire_is_unaffordable():
+    """See _build_hire_orders's own docstring: without this, requesting a hire the engine
+    will silently reject (kaggriculture.py's _do_hire: money < cost) still gets charged its
+    full Fibonacci cost by _orders_cash_cost against this turn's cash_reserved tracker,
+    under-estimating real money left for every later builder (land/feed/seed/fertilizer).
+    Fibonacci costs for hires 0,1,2,3 are 1,1,2,3 (cumulative 1,2,4,7) -- a budget of 5 covers
+    the first 3 (cumulative 4) but not a 4th (would need 7)."""
+    farm = _farm({})
+    farm["hires_today"] = 0
+    orders = main._build_hire_orders(farm, money_left=5)
+    assert len(orders) == 3
+
+
 def test_build_land_orders_blocked_below_utilization_gate():
     """See module docstring's Land utilization gate note: a replay showed
     this agent buying its 4th quadrant by day 11 while plateauing at
