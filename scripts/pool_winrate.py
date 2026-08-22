@@ -65,6 +65,7 @@ DEFAULT_POOL = [
     "reference/main_price_reactive_seed_reserve_submitted_20260819.py",
     "reference/main_harvest_timing_submitted_20260821.py",
     "reference/main_mc_tuned_priority_submitted_20260822.py",
+    "reference/main_strawberry_ramp_submitted_20260822.py",
 ]
 
 
