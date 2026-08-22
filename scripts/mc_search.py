@@ -101,6 +101,17 @@ PARAM_SPACE = {
     "HANDS_TARGET_Q1": ("int", 3, 9),  # main.py: 8 (== the un-overridden formula's own value)
     "HARVEST_SAFE_PRIORITY": ("float", 0.51, 1.9),  # main.py: 0.75
     "WATER_YIELD_INERT_PRIORITY": ("float", 1.1, 3.9),  # main.py: 3
+    # Added 2026-08-22 after the time-varying crop-mix ramp (see strawberry-shift-throughput-gap
+    # memory note's final update) hand-picked at STRAWBERRY_LATE_SHARE=0.45/RAMP_START_DAY=10/
+    # RAMP_DURATION=10/RESERVE_LATE=6 already cleared +9.5pp on the full pool (52.9%->62.4%,
+    # every opponent improved or tied, none regressed) with zero tuning -- searching around
+    # these hand-picked values to see if there's more room, not because they looked wrong.
+    "STRAWBERRY_LATE_SHARE": ("float", 0.35, 0.60),  # main.py: 0.45
+    "CROP_MIX_RAMP_START_DAY": ("int", 2, 10),  # main.py: 10 -- narrowed after a first pass
+    # showed low start days (3-7) and short durations (3-8) consistently beating the initial
+    # hand-picked 10/10 by a wide margin (up to 0.82 vs ~0.5-0.6 win rate on the search pool)
+    "CROP_MIX_RAMP_DURATION": ("int", 2, 10),  # main.py: 10
+    "STRAWBERRY_RESERVE_LATE": ("int", 3, 8),  # main.py: 6
 }
 
 # WHEAT_SELL_THRESHOLD isn't a top-level `NAME = value` constant -- it's

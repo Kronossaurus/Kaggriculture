@@ -32,6 +32,7 @@ Every function tested here caused a real bug this session hit once already
 
 from __future__ import annotations
 
+import itertools
 import sys
 
 import main
@@ -586,6 +587,45 @@ def test_build_seed_orders_does_not_shrink_reserve_below_baseline_on_a_dip():
     orders = main._build_seed_orders(seeds, money=100000.0, days_remaining=20, prices=prices)
     melon_orders = [o for o in orders if o[1] == "MELON"]
     assert len(melon_orders) == main.SEED_RESERVE["MELON"]
+
+
+def test_crop_target_share_unramped_before_start_day():
+    """Before CROP_MIX_RAMP_START_DAY the mix must be byte-identical to the flat
+    CROP_TARGET_SHARE baseline -- day=0 (the default used everywhere this wasn't threaded
+    through, e.g. every existing _CropPlanner test) must reproduce the pre-ramp behavior
+    exactly, not just approximately."""
+    share = main._crop_target_share(day=0)
+    assert share == main.CROP_TARGET_SHARE
+
+
+def test_crop_target_share_fully_ramped_after_duration():
+    """Once CROP_MIX_RAMP_DURATION days past CROP_MIX_RAMP_START_DAY, STRAWBERRY's share
+    must equal STRAWBERRY_LATE_SHARE exactly, and the other 4 crops must still sum with it
+    to 1.0 (proportionally scaled down, not just left as the stale baseline)."""
+    day = main.CROP_MIX_RAMP_START_DAY + main.CROP_MIX_RAMP_DURATION
+    share = main._crop_target_share(day)
+    assert abs(share["STRAWBERRY"] - main.STRAWBERRY_LATE_SHARE) < 1e-9
+    assert abs(sum(share.values()) - 1.0) < 1e-9
+    # every other crop kept the same relative balance to each other as the baseline
+    others = [c for c in main.CASH_CROPS if c != "STRAWBERRY"]
+    for a, b in itertools.pairwise(others):
+        base_ratio = main.CROP_TARGET_SHARE[a] / main.CROP_TARGET_SHARE[b]
+        ramped_ratio = share[a] / share[b]
+        assert abs(ramped_ratio - base_ratio) < 1e-9
+
+
+def test_crop_target_share_ramps_linearly_at_the_midpoint():
+    day = main.CROP_MIX_RAMP_START_DAY + main.CROP_MIX_RAMP_DURATION // 2
+    share = main._crop_target_share(day)
+    base = main.CROP_TARGET_SHARE["STRAWBERRY"]
+    expected_midpoint = (base + main.STRAWBERRY_LATE_SHARE) / 2
+    assert abs(share["STRAWBERRY"] - expected_midpoint) < 0.01
+
+
+def test_strawberry_seed_reserve_ramps_on_the_same_schedule():
+    assert main._strawberry_seed_reserve(day=0) == main.SEED_RESERVE["STRAWBERRY"]
+    fully_ramped_day = main.CROP_MIX_RAMP_START_DAY + main.CROP_MIX_RAMP_DURATION
+    assert main._strawberry_seed_reserve(fully_ramped_day) == main.STRAWBERRY_RESERVE_LATE
 
 
 def test_build_fertilizer_orders_stockpiles_when_price_is_cheap_and_wanted():

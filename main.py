@@ -1329,6 +1329,34 @@ from kaggle_environments.envs.kaggriculture.kaggriculture import (
 
 CASH_CROPS = ("MELON", "WHEAT", "CARROT", "TOMATO", "STRAWBERRY")
 CROP_TARGET_SHARE = {"MELON": 0.45, "WHEAT": 0.25, "CARROT": 0.15, "TOMATO": 0.10, "STRAWBERRY": 0.05}
+# [[strawberry-shift-throughput-gap]]: two straight attempts to shift this flat, season-long dict
+# toward real-ladder players' ~64% STRAWBERRY share regressed hard (47.8%->25.6% on the second,
+# post-throughput-fix attempt) via a capital-allocation/cash-flow-timing mechanism a *flat* share
+# can't express -- STRAWBERRY's $100 seed (10x WHEAT's $10) plus its first_yield_day=10 payback
+# delay (vs WHEAT's 2) means committing to it early starves the fast-compounding-cash engine this
+# agent's early game depends on. STRAWBERRY_LATE_SHARE/CROP_MIX_RAMP_START_DAY/
+# CROP_MIX_RAMP_DURATION (below) let the target ramp up *after* the early game has had time to
+# compound cash, instead of holding one value the whole season. Hand-picked first (0.45/day
+# 10/10-day ramp) already cleared +9.5pp on the full 30-seed pool with every opponent improving
+# or tying, none regressing (52.9%->62.4%) -- then MC-searched (scripts/mc_search.py) for a
+# better combination; the search consistently favored an *earlier* ramp start (day 2-10) and a
+# *short* duration (2-8 days) over the hand-picked 10/10, up to 0.84 win rate on the search pool
+# vs. ~0.5-0.6 for later/slower starts.
+STRAWBERRY_LATE_SHARE = 0.478  # STRAWBERRY's target share once the mix ramp fully completes --
+    # the other 4 crops' shares scale down proportionally to keep the mix summing to 1 (see
+    # _crop_target_share), same relative balance among themselves as CROP_TARGET_SHARE's baseline.
+CROP_MIX_RAMP_START_DAY = 8  # day the mix starts shifting toward STRAWBERRY_LATE_SHARE --
+    # MC-searched; the region 2-10 all scored well, so this isn't a sharp optimum, just the top
+    # of the search (see the constant block's comment above for the full result).
+CROP_MIX_RAMP_DURATION = 2  # days over which the shift completes, linearly, starting at
+    # CROP_MIX_RAMP_START_DAY -- 0 means an instant step at that day instead of a ramp.
+STRAWBERRY_RESERVE_LATE = 3  # SEED_RESERVE["STRAWBERRY"] ramps toward this on the same schedule
+    # as the target-share ramp above -- without also raising the seed *reserve*,
+    # _build_seed_orders would never stock enough STRAWBERRY seed to actually reach a higher
+    # target share regardless of what _CropPlanner.choose() wants to plant. Barely above the
+    # unramped baseline (SEED_RESERVE["STRAWBERRY"]==2) -- the search found low reserve values
+    # winning consistently, likely because a small standing reserve restocked continuously each
+    # day still sustains high throughput over a season, without tying up cash in idle seed stock.
 FERTILIZE_CROPS = {"WHEAT", "CARROT", "TOMATO", "STRAWBERRY"}
 PRICE_ATTRACTIVENESS_WEIGHT = 0.26  # was 0.1; how much a crop's current price (as a ratio
                                      # of its base) pulls _CropPlanner.choose() toward it,
@@ -1757,6 +1785,40 @@ def _is_yield_inert(tile, day):
     return age < window_start
 
 
+def _crop_mix_ramp_fraction(day):
+    """0.0 before CROP_MIX_RAMP_START_DAY, 1.0 once CROP_MIX_RAMP_DURATION days past it,
+    linear in between -- shared by the target-share and seed-reserve ramps below so both move
+    on the same schedule. See CROP_MIX_RAMP_START_DAY's own comment for why this doesn't start
+    at day 0."""
+    if CROP_MIX_RAMP_DURATION <= 0:
+        return 1.0 if day >= CROP_MIX_RAMP_START_DAY else 0.0
+    return max(0.0, min(1.0, (day - CROP_MIX_RAMP_START_DAY) / CROP_MIX_RAMP_DURATION))
+
+
+def _crop_target_share(day):
+    """CROP_TARGET_SHARE, but with STRAWBERRY's share ramped toward STRAWBERRY_LATE_SHARE as
+    `day` advances (see STRAWBERRY_LATE_SHARE's comment) -- the other 4 crops scale down
+    proportionally so the mix still sums to 1, preserving their relative baseline balance
+    rather than favoring any one of them."""
+    frac = _crop_mix_ramp_fraction(day)
+    base_strawberry = CROP_TARGET_SHARE["STRAWBERRY"]
+    strawberry_share = base_strawberry + frac * (STRAWBERRY_LATE_SHARE - base_strawberry)
+    other_scale = (1 - strawberry_share) / (1 - base_strawberry)
+    return {
+        crop: strawberry_share if crop == "STRAWBERRY" else share * other_scale
+        for crop, share in CROP_TARGET_SHARE.items()
+    }
+
+
+def _strawberry_seed_reserve(day):
+    """SEED_RESERVE["STRAWBERRY"], ramped toward STRAWBERRY_RESERVE_LATE on the same schedule
+    as _crop_target_share -- without this, _build_seed_orders would never stock enough
+    STRAWBERRY seed for a higher target share to actually be reachable."""
+    frac = _crop_mix_ramp_fraction(day)
+    base = SEED_RESERVE["STRAWBERRY"]
+    return base + frac * (STRAWBERRY_RESERVE_LATE - base)
+
+
 class _CropPlanner:
     """Tracks, for one turn, which crop each new PLANT should use.
 
@@ -1766,7 +1828,8 @@ class _CropPlanner:
     `private["seeds"]`, never seeds bought this same turn.
     """
 
-    def __init__(self, private, farm, days_remaining, prices=None):
+    def __init__(self, private, farm, days_remaining, day=0, prices=None):
+        self.target_share = _crop_target_share(day)
         self.seed_budget = dict(private.get("seeds", {}))
         self.prices = prices or {}
         # A crop that can't reach first_yield_day (+ a day of slack to sell it
@@ -1806,7 +1869,7 @@ class _CropPlanner:
         gate, so a small-target-share crop at a genuinely great price still
         loses to a big-target-share crop merely above threshold. See the
         module docstring's Price-aware planting note."""
-        gap = self.counts[crop] / self.total - CROP_TARGET_SHARE[crop]
+        gap = self.counts[crop] / self.total - self.target_share[crop]
         price = self.prices.get(crop)
         if price is None:
             return gap
@@ -2624,7 +2687,7 @@ def _build_hire_orders(farm, money_left):
     return orders
 
 
-def _build_seed_orders(seeds, money, days_remaining, prices):
+def _build_seed_orders(seeds, money, days_remaining, prices, day=0):
     """Price-reactive seed reserve: each crop's target buffer is
     `SEED_RESERVE` scaled up by how far its current price sits above its
     own base (capped at `SEED_RESERVE_PRICE_CAP`), never scaled down
@@ -2639,10 +2702,15 @@ def _build_seed_orders(seeds, money, days_remaining, prices):
     instead means WHEAT -- whose price rarely swings far above its own
     base -- stays close to its baseline reserve on its own, without a
     special case, while a crop genuinely trading well (MELON/STRAWBERRY
-    above base) earns more room to stock up."""
+    above base) earns more room to stock up. STRAWBERRY's own base_reserve
+    additionally ramps over the season -- see _strawberry_seed_reserve --
+    so this stays a plain dict lookup for every other crop."""
     orders = []
     remaining = money - SAFETY_RESERVE
+    strawberry_reserve = _strawberry_seed_reserve(day)
     for crop, base_reserve in SEED_RESERVE.items():
+        if crop == "STRAWBERRY":
+            base_reserve = strawberry_reserve
         if days_remaining < CROPS[crop]["first_yield_day"] + SEED_BUFFER_DAYS:
             continue  # wouldn't mature (and sell) before the season ends
         base_price = MARKET_PARAMS[crop]["base"]
@@ -2894,7 +2962,7 @@ def agent(obs, config=None):
     inventories = private.get("inventories", [{}])
 
     want_fertilizer = _any_fertilizable(farm, day)
-    planner = _CropPlanner(private, farm, days_remaining, market_prices)
+    planner = _CropPlanner(private, farm, days_remaining, day, market_prices)
     animal_planner = _AnimalPlanner(farm, shed, market_prices)
     animal_zone = _animal_zone(farm, board_size, animal_planner.remaining_structures())
     quadrant_util = _quadrant_utilization(farm, board_size)
@@ -3000,7 +3068,7 @@ def agent(obs, config=None):
     market += feed_orders
     cash_reserved += _orders_cash_cost(feed_orders, farm, market_inventory)
 
-    seed_orders = _build_seed_orders(seeds, farm["money"] - cash_reserved, days_remaining, market_prices)
+    seed_orders = _build_seed_orders(seeds, farm["money"] - cash_reserved, days_remaining, market_prices, day)
     market += seed_orders
     cash_reserved += _orders_cash_cost(seed_orders, farm, market_inventory)
 
