@@ -18,10 +18,12 @@ of the exact main.py submitted to Kaggle on that date -- see main.py's
 own docstring's Planting priority under the gate note; and
 `reference/main_price_reactive_seed_reserve_submitted_20260819.py`, a
 frozen snapshot of the exact main.py submitted to Kaggle on that date --
-see main.py's own docstring's Price-reactive seed reserve note. Standing
-rule: every Kaggle submission gets snapshotted here so future runs
-automatically check new work against what was actually shipped, not just
-hand-picked ablations.
+see main.py's own docstring's Price-reactive seed reserve note; and
+`reference/main_harvest_timing_submitted_20260821.py`, a frozen snapshot
+of the exact main.py submitted to Kaggle on that date -- see main.py's
+own docstring's Harvest-timing note. Standing rule: every Kaggle
+submission gets snapshotted here so future runs automatically check new
+work against what was actually shipped, not just hand-picked ablations.
 `kaggle_environments`' own `random`/`starter` built-ins were dropped from
 the default (2026-08-18): every main.py revision this session has beaten
 both 10/10 seeds by a wide margin, so they no longer discriminate between
@@ -61,6 +63,7 @@ DEFAULT_POOL = [
     "reference/main_fertilizer_selling_submitted_20260817.py",
     "reference/main_plant_priority_submitted_20260818.py",
     "reference/main_price_reactive_seed_reserve_submitted_20260819.py",
+    "reference/main_harvest_timing_submitted_20260821.py",
 ]
 
 
