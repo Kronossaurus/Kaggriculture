@@ -39,6 +39,7 @@ import json
 import random
 import re
 import sys
+import time
 from pathlib import Path
 
 SCRIPT_DIR = Path(__file__).resolve().parent
@@ -89,6 +90,17 @@ PARAM_SPACE = {
     "SAFETY_RESERVE": ("int", 0, 800),  # main.py: 300
     "FERTILIZER_MAX_PRICE_FRAC": ("float", 1.05, 2.0),  # main.py: 1.2
     "SHED_OVERFLOW_GUARD": ("float", 0.6, 0.95),  # main.py: 0.85
+    # Added 2026-08-22 after three hand-picked single-value attempts each regressed (see
+    # hands-target-q1-reduction-attempt / water-yield-inert-deprioritization-tradeoff /
+    # harvest-safe-deprioritization-tradeoff memory notes) -- exactly the "can't find
+    # interactions between constants" gap this script's own docstring describes, since all
+    # three plausibly interact (crew size changes how much contention the two priority tiers
+    # actually see). HARVEST_SAFE_PRIORITY's range deliberately starts just above 0.5 (at-risk
+    # water's own priority), not at 0.5 or below -- the first attempt tied them exactly and
+    # regressed by turning a decisive ordering into an ambiguous distance-only contention.
+    "HANDS_TARGET_Q1": ("int", 3, 9),  # main.py: 8 (== the un-overridden formula's own value)
+    "HARVEST_SAFE_PRIORITY": ("float", 0.51, 1.9),  # main.py: 0.75
+    "WATER_YIELD_INERT_PRIORITY": ("float", 1.1, 3.9),  # main.py: 3
 }
 
 # WHEAT_SELL_THRESHOLD isn't a top-level `NAME = value` constant -- it's
@@ -190,24 +202,33 @@ def main() -> None:
           f"varying {list(active)}, engine={args.engine} ===\n")
     RESULTS_PATH.parent.mkdir(parents=True, exist_ok=True)
     results = []
+    search_start = time.monotonic()
     with RESULTS_PATH.open("w", encoding="utf-8") as out:
         for trial_id in range(1, args.trials + 1):
+            trial_start = time.monotonic()
             params = sample_params(rng, active)
             trial_path = make_trial_agent(base_src, params, trial_id)
             score = evaluate(str(trial_path), pool, args.seeds, args.steps, play_fn=play_fn)
-            row = {"trial": trial_id, "params": params, **score}
+            trial_elapsed = time.monotonic() - trial_start
+            row = {"trial": trial_id, "params": params, "elapsed_s": round(trial_elapsed, 1), **score}
             results.append(row)
             out.write(json.dumps(row) + "\n")
             out.flush()
+            elapsed_total = time.monotonic() - search_start
+            eta = elapsed_total / trial_id * (args.trials - trial_id)
             print(
                 f"[{trial_id:3d}/{args.trials}] win_rate={score['win_rate']:.2f} "
-                f"margin=${score['mean_margin']:>9,.0f}  {params}"
+                f"margin=${score['mean_margin']:>9,.0f}  {trial_elapsed:5.1f}s/trial  "
+                f"elapsed={elapsed_total / 60:5.1f}m  eta={eta / 60:5.1f}m  {params}"
             )
 
+    total_elapsed = time.monotonic() - search_start
     results.sort(key=lambda r: (r["win_rate"], r["mean_margin"]), reverse=True)
-    print(f"\n=== Top 5 (full results in {RESULTS_PATH.relative_to(REPO_ROOT)}) ===")
+    print(f"\n=== Top 5 (full results in {RESULTS_PATH.relative_to(REPO_ROOT)}) === "
+          f"total search time: {total_elapsed / 60:.1f}m ({total_elapsed / args.trials:.1f}s/trial avg)")
     for row in results[:5]:
-        print(f"win_rate={row['win_rate']:.2f}  margin=${row['mean_margin']:>9,.0f}  {row['params']}")
+        print(f"win_rate={row['win_rate']:.2f}  margin=${row['mean_margin']:>9,.0f}  "
+              f"{row['elapsed_s']:5.1f}s  {row['params']}")
     print(
         "\nThese are search-phase results (small pool, few seeds) -- do NOT trust a "
         "single pool_winrate.py run to confirm the winner. A 10-seed comparison has a "

@@ -1360,6 +1360,23 @@ HARVEST_AT_RISK_DIST_BIAS = 1000  # subtracted from a harvestable tile's sort_di
     # large enough to strictly dominate any real on-board distance, so an about-to-expire ripe
     # tile is always served before a merely-closer one still within priority 0. See the module
     # docstring's Harvest-ready tiles rotting to weeds note.
+HARVEST_SAFE_PRIORITY = 1.657  # MC-searched (scripts/mc_search.py) -- a NOT-at-risk harvestable
+    # tile's priority (at-risk stays 0, unchanged). Deliberately kept > 0.5 (at-risk water's own
+    # priority) by construction here so the two never tie -- see
+    # [[harvest-safe-deprioritization-tradeoff]] for why an exact tie (the first, hand-picked
+    # attempt) regressed by turning a decisive ordering into an ambiguous distance-only
+    # contention. Found together with WATER_YIELD_INERT_PRIORITY and HANDS_TARGET_Q1 above in a
+    # focused 40-trial search using both reactive sentinels as the search pool directly (not the
+    # usual x492+fertilizer_selling default -- see mc_search.py's DEFAULT_SEARCH_POOL): this
+    # combination scored 0.62 win rate there vs. baseline's 0.50, and confirmed at the full
+    # 30-seed default-pool protocol: 47.8%->52.8% overall, with BOTH reactive sentinels
+    # improving (main_price_reactive_seed_reserve 26.7%->30.0%, main_harvest_timing
+    # 53.3%->66.7%) -- unlike either single hand-picked attempt, no trade-off between them.
+WATER_YIELD_INERT_PRIORITY = 2.971  # MC-searched alongside HARVEST_SAFE_PRIORITY above --
+    # priority for a not-yet-at-risk tile whose watering wouldn't add any yield_units yet
+    # (_is_yield_inert). See [[water-yield-inert-deprioritization-tradeoff]] for the first,
+    # hand-picked attempt at this (value 3 -- barely different in magnitude, but paired with an
+    # exactly-tied HARVEST_SAFE_PRIORITY there instead of a properly searched one).
 WHEAT_SHED_RETURN_THRESHOLD = 5  # minimum carried WHEAT before it's worth a dedicated trip to
     # the shed (_find_personal_target) or before it's eligible to DROP once already there
     # (_decide_unit) -- 12th market-order-slot-starvation attempt. Must exceed the 4-unit cap
@@ -1482,6 +1499,16 @@ FARM_HAND_COST_MULT = 1  # data/README.md default; mirrors kaggriculture.py's ow
                           # used only to estimate HIRE's own same-turn cash draw -- see
                           # _orders_cash_cost
 
+HANDS_TARGET_Q1 = 8  # hands specifically at 1 quadrant (25-tile NW-only opening), overriding
+    # HANDS_BASE+HANDS_PER_QUADRANT below for that one case (see _hands_target). MC-searched
+    # (scripts/mc_search.py) alongside HARVEST_SAFE_PRIORITY/WATER_YIELD_INERT_PRIORITY below --
+    # every top candidate across two separate 40-trial searches landed at 7-9, i.e. at or near
+    # the un-overridden formula's own value: see [[hands-target-q1-reduction-attempt]], two
+    # earlier hand-picked cuts (4, 6) both regressed non-monotonically despite real-ladder data
+    # (~4.76 average) and this agent's own idle-time trace suggesting genuine slack existed --
+    # the search confirms that slack still isn't safely cuttable, at least not via this
+    # constant alone. Kept at 8 (== no actual change from the formula), the priority tuning
+    # below is what MC search found actually helps.
 HANDS_BASE = 6  # was 2; see the module docstring's Harvest-timing note's MC-search-tuning
                  # follow-up -- found by scripts/mc_search.py paired with the other 9 knobs
                  # below, on top of the harvest-timing fix + all 4 land-purchase levers
@@ -1702,6 +1729,32 @@ def _is_harvestable(tile, day, liquidating):
         or tile["yield_units"] >= crop_data["max_yield"]
         or liquidating
     )
+
+
+def _is_yield_inert(tile, day):
+    """A one-time crop's WATER action doesn't start adding yield_units the
+    instant it's plantable/legal -- kaggriculture.py's own WATER handler only
+    applies the +1 (+2 fertilized) bonus once age reaches
+    `window_start = (max_yield_day + 1) // 2`, not `first_yield_day` (verified
+    directly against the engine source; data/README.md doesn't document this
+    window). For WHEAT/CARROT the two happen to coincide (both 2), so this
+    never matters for them; for MELON, `window_start` (6) is well *before*
+    `first_yield_day` (10) -- see _is_harvestable's own Harvest-timing note on
+    why MELON's bonus window already saturates by the time it's legal to
+    harvest. Watering during this window is still mandatory (skipping it
+    risks the same 2-consecutive-miss WEED conversion as any other day) --
+    this only identifies when it's *safe to deprioritize*, not safe to skip.
+    Ongoing crops (tomato/strawberry) are never yield-inert this way: their
+    own scheduled-production cadence, not a watering bonus window, governs
+    when yield_units appears."""
+    if not isinstance(tile, dict) or tile.get("kind") != "PLANT":
+        return False
+    crop_data = CROPS[tile["crop"]]
+    if crop_data["ongoing"]:
+        return False
+    window_start = (crop_data["max_yield_day"] + 1) // 2
+    age = day - tile["planted_day"]
+    return age < window_start
 
 
 class _CropPlanner:
@@ -2029,11 +2082,21 @@ def _build_tile_jobs(
             tile = farm["tiles"][y][x]
             if _is_plant(tile):
                 if _is_harvestable(tile, day, liquidating):
-                    # See the module docstring's Harvest-ready tiles rotting to weeds note:
-                    # priority stays 0 either way (already top tier); the bias only breaks
-                    # ties within it, favoring a tile one missed watering from becoming a WEED.
+                    # An at-risk harvestable tile keeps priority 0 (top tier, plus the
+                    # dist_bias tie-break) -- still subject to the same 2-consecutive-miss WEED
+                    # conversion as any other tile, genuinely as urgent as anything gets. A
+                    # *safe* one (consecutive_unwatered==0, a full day of slack) uses
+                    # HARVEST_SAFE_PRIORITY instead of the unconditional 0 -- see
+                    # [[harvest-safe-deprioritization-tradeoff]]: a first attempt tied it
+                    # exactly to at-risk water's 0.5, which just made the two contend on raw
+                    # distance (an ambiguous coin-flip, not a real ordering) and regressed by
+                    # delaying harvest->carry->shed->sell realization near the season's hard
+                    # cutoff. HARVEST_SAFE_PRIORITY must differ from WATER's at-risk priority,
+                    # not tie it, so the ordering between them is decisive either way instead
+                    # of contested -- MC-searched (scripts/mc_search.py) instead of guessed.
                     at_risk = not liquidating and tile.get("consecutive_unwatered", 0) >= 1
-                    jobs.append((x, y, 0, -HARVEST_AT_RISK_DIST_BIAS if at_risk else 0))  # harvest
+                    priority = 0 if at_risk else HARVEST_SAFE_PRIORITY
+                    jobs.append((x, y, priority, -HARVEST_AT_RISK_DIST_BIAS if at_risk else 0))  # harvest
                 elif not tile["watered_today"]:
                     at_risk = not liquidating and tile.get("consecutive_unwatered", 0) >= 1
                     # Third variant after [[harvest-early-at-risk-salvage-regression]]: forcing
@@ -2050,7 +2113,25 @@ def _build_tile_jobs(
                     # much it competes with real harvests to only when the risk is genuinely
                     # close to unrecoverable.
                     urgent = at_risk and last_chance_window
-                    jobs.append((x, y, 0 if urgent else (0.5 if at_risk else water_priority), 0))  # water
+                    if urgent:
+                        priority = 0
+                    elif at_risk:
+                        priority = 0.5
+                    elif not liquidating and _is_yield_inert(tile, day):
+                        # See _is_yield_inert's own docstring and
+                        # [[water-yield-inert-deprioritization-tradeoff]]: a still-growing
+                        # one-time crop before kaggriculture.py's own yield-bonus window adds
+                        # no yield_units from being watered today, only matters for avoiding
+                        # the same 2-consecutive-miss WEED clock as any day -- and
+                        # consecutive_unwatered==0 here (the at_risk branch above already
+                        # caught >=1) means a full day of slack. First attempt at this
+                        # regressed by increasing the rate of a tile's *first* missed
+                        # watering; MC-searched here instead of the single hand-picked value
+                        # (3) that attempt used.
+                        priority = WATER_YIELD_INERT_PRIORITY
+                    else:
+                        priority = water_priority
+                    jobs.append((x, y, priority, 0))  # water
             elif _is_weed(tile):
                 jobs.append((x, y, 2, 0))  # clear a weed to reclaim the tile
             elif _is_animal_tile(tile):
@@ -2307,6 +2388,10 @@ def _build_sell_orders(shed, prices, days_remaining, farm):
 
 
 def _hands_target(quadrants):
+    if quadrants <= 1:
+        return HANDS_TARGET_Q1  # surgical override for the single-quadrant opening -- see
+                                  # HANDS_TARGET_Q1's own comment. HANDS_BASE/HANDS_PER_QUADRANT
+                                  # below untouched for quadrants >= 2.
     return min(MAX_HANDS, HANDS_BASE + HANDS_PER_QUADRANT * quadrants)
 
 

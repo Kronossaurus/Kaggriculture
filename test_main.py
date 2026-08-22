@@ -136,6 +136,36 @@ def test_is_harvestable_false_when_yield_units_zero():
     assert not main._is_harvestable(empty, day=20, liquidating=False)  # long past first_yield_day, nothing to harvest though
 
 
+def test_is_yield_inert_true_before_the_watering_bonus_window():
+    """WHEAT's watering bonus window_start = (max_yield_day+1)//2 = (4+1)//2
+    = 2, same as its first_yield_day here -- age 0/1 add no yield_units
+    when watered (verified directly against kaggriculture.py's WATER
+    handler, not documented in data/README.md)."""
+    fresh = _tile(crop="WHEAT", planted_day=5)
+    assert main._is_yield_inert(fresh, day=5)  # age 0
+    assert main._is_yield_inert(fresh, day=6)  # age 1
+
+
+def test_is_yield_inert_false_once_the_bonus_window_starts():
+    tile = _tile(crop="WHEAT", planted_day=5)
+    assert not main._is_yield_inert(tile, day=7)  # age 2 == window_start
+
+
+def test_is_yield_inert_melon_window_starts_before_first_yield_day():
+    """MELON's window_start ((12+1)//2=6) is well before its first_yield_day
+    (10) -- see _is_harvestable's own Harvest-timing note on why this
+    matters (its bonus window already saturates by the time it's legal to
+    harvest)."""
+    melon = _tile(crop="MELON", planted_day=0)
+    assert main._is_yield_inert(melon, day=5)  # age 5, still < window_start (6)
+    assert not main._is_yield_inert(melon, day=6)  # age 6 == window_start
+
+
+def test_is_yield_inert_false_for_ongoing_crops():
+    tomato = _tile(crop="TOMATO", planted_day=0)
+    assert not main._is_yield_inert(tomato, day=0)  # age 0 -- ongoing crops are never gated this way
+
+
 def test_is_fertilizable_covers_full_ongoing_crop_schedule():
     """TOMATO's max_yield_day (8) is just a placeholder equal to
     first_yield_day (kaggriculture.py's CROPS table) -- not "last
@@ -345,6 +375,16 @@ def test_build_sell_orders_wheat_reserve_ignored_when_liquidating():
     prices = {"WHEAT": 5}  # below threshold -- only liquidating forces the sell here
     orders = main._build_sell_orders(shed, prices, days_remaining=1, farm=farm)
     assert orders == [["SELL", "WHEAT", 20]]
+
+
+def test_hands_target_uses_the_q1_override_only_at_one_quadrant():
+    """See HANDS_TARGET_Q1's own comment: a surgical override for the
+    single-quadrant opening, MC-searched rather than hand-picked -- leaves
+    the HANDS_BASE + HANDS_PER_QUADRANT*quadrants formula untouched for
+    quadrants >= 2."""
+    assert main._hands_target(1) == main.HANDS_TARGET_Q1
+    assert main._hands_target(2) == min(main.MAX_HANDS, main.HANDS_BASE + main.HANDS_PER_QUADRANT * 2)
+    assert main._hands_target(3) == min(main.MAX_HANDS, main.HANDS_BASE + main.HANDS_PER_QUADRANT * 3)
 
 
 def test_build_land_orders_blocked_below_utilization_gate():
@@ -824,6 +864,73 @@ def test_find_target_at_risk_water_escalates_to_harvest_tier_within_last_chance_
         animal_zone=set(), last_chance_window=True,
     )
     assert target[2] == 0
+
+
+def test_find_target_water_deprioritized_when_yield_inert_and_not_at_risk():
+    """See _is_yield_inert's own docstring: WHEAT age 0 is well before its
+    watering bonus window (window_start=2), so today's WATER adds no
+    yield_units at all -- only matters for avoiding the 2-consecutive-miss
+    WEED clock, and consecutive_unwatered==0 here means a full day of slack
+    before that's even a concern. Should fall to WATER_YIELD_INERT_PRIORITY,
+    not the routine water_priority, freeing crew for chores useful today."""
+    board_size = 5
+    tiles = [[None for _ in range(board_size)] for _ in range(board_size)]
+    fresh = _tile(crop="WHEAT", planted_day=0, watered_today=False)
+    fresh["consecutive_unwatered"] = 0  # not at risk, unlike _tile()'s own watered_today=False default
+    tiles[0][1] = fresh
+    farm = {"tiles": tiles, "hands": []}
+    animal_planner = main._AnimalPlanner(farm, {}, {})
+    target = _resolve_target(
+        pos=[0, 0], farm=farm, day=0, board_size=board_size, inv={},  # age 0 < WHEAT's window_start (2)
+        planner=main._CropPlanner({"seeds": {}}, farm, days_remaining=20),
+        animal_planner=animal_planner, shed_tiles=set(),
+        want_fertilizer=False, shed_wheat_available=False, liquidating=False,
+        animal_zone=set(),
+    )
+    assert target[2] == main.WATER_YIELD_INERT_PRIORITY
+
+
+def test_find_target_water_normal_priority_once_past_yield_inert_window():
+    """Same tile, one day later: age 2 == WHEAT's window_start, so today's
+    WATER *does* add yield_units again -- back to the routine water_priority,
+    not the deprioritized tier."""
+    board_size = 5
+    tiles = [[None for _ in range(board_size)] for _ in range(board_size)]
+    tile = _tile(crop="WHEAT", planted_day=0, watered_today=False)
+    tile["consecutive_unwatered"] = 0
+    tiles[0][1] = tile
+    farm = {"tiles": tiles, "hands": []}
+    animal_planner = main._AnimalPlanner(farm, {}, {})
+    target = _resolve_target(
+        pos=[0, 0], farm=farm, day=2, board_size=board_size, inv={},  # age 2 == WHEAT's window_start
+        planner=main._CropPlanner({"seeds": {}}, farm, days_remaining=20),
+        animal_planner=animal_planner, shed_tiles=set(),
+        want_fertilizer=False, shed_wheat_available=False, liquidating=False,
+        animal_zone=set(),
+    )
+    assert target[2] == 1  # water_priority (not liquidating)
+
+
+def test_find_target_safe_harvestable_tile_uses_harvest_safe_priority():
+    """A ripe tile with consecutive_unwatered==0 has a full day of slack
+    before it's in any danger -- HARVEST_SAFE_PRIORITY reflects that it's
+    not automatically top-tier just for being ready to harvest, but (unlike
+    the reverted first attempt) is a distinct value from at-risk water's
+    0.5, not tied to it -- see HARVEST_SAFE_PRIORITY's own comment."""
+    board_size = 5
+    tiles = [[None for _ in range(board_size)] for _ in range(board_size)]
+    safe = _tile(crop="WHEAT", planted_day=0, watered_today=True, yield_units=4)  # consecutive_unwatered=0
+    tiles[0][1] = safe
+    farm = {"tiles": tiles, "hands": []}
+    animal_planner = main._AnimalPlanner(farm, {}, {})
+    target = _resolve_target(
+        pos=[0, 0], farm=farm, day=4, board_size=board_size, inv={},  # age 4 == WHEAT's max_yield_day
+        planner=main._CropPlanner({"seeds": {}}, farm, days_remaining=20),
+        animal_planner=animal_planner, shed_tiles=set(),
+        want_fertilizer=False, shed_wheat_available=False, liquidating=False,
+        animal_zone=set(),
+    )
+    assert target[2] == main.HARVEST_SAFE_PRIORITY
 
 
 def test_find_target_prioritizes_an_at_risk_harvestable_tile_over_a_closer_one():
