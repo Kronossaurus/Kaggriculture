@@ -88,18 +88,52 @@ def test_is_harvestable_false_immediately_after_planting():
     yield_units at 1 the instant it's planted (kaggriculture.py) -- so
     yield_units > 0 alone must NOT mean ready."""
     fresh = _tile(crop="WHEAT", planted_day=5, yield_units=1)
-    assert not main._is_harvestable(fresh, day=5)
-    assert not main._is_harvestable(fresh, day=6)  # age 1, still < first_yield_day of 2
+    assert not main._is_harvestable(fresh, day=5, liquidating=False)
+    assert not main._is_harvestable(fresh, day=6, liquidating=False)  # age 1, still < first_yield_day of 2
 
 
-def test_is_harvestable_true_once_first_yield_day_reached():
+def test_is_harvestable_false_at_first_yield_day_still_growing():
+    """Harvest-timing note: legal (age >= first_yield_day) is NOT the same as
+    fully grown -- WHEAT's yield_units keeps growing (watered) through
+    max_yield_day (age 4). Harvesting the instant it's legal locks in
+    yield_units=1 instead of up to 4 (watered) or 6 (fertilized)."""
     ripe = _tile(crop="WHEAT", planted_day=5, yield_units=1)
-    assert main._is_harvestable(ripe, day=7)  # age 2 == WHEAT's first_yield_day
+    assert not main._is_harvestable(ripe, day=7, liquidating=False)  # age 2 == first_yield_day, not max_yield_day (4)
+
+
+def test_is_harvestable_true_once_max_yield_day_reached():
+    mature = _tile(crop="WHEAT", planted_day=5, yield_units=3)
+    assert main._is_harvestable(mature, day=9, liquidating=False)  # age 4 == WHEAT's max_yield_day
+
+
+def test_is_harvestable_true_once_yield_cap_reached_even_before_max_yield_day():
+    """Nothing left to gain by waiting once yield_units hits max_yield (e.g.
+    fertilized growth reaching the cap early) -- no reason to keep the tile
+    occupied past that point."""
+    capped = _tile(crop="WHEAT", planted_day=5, yield_units=6)  # WHEAT's max_yield
+    assert main._is_harvestable(capped, day=8, liquidating=False)  # age 3, still < max_yield_day (4)
+
+
+def test_is_harvestable_true_early_when_liquidating():
+    """Mirrors the X578/X594 kernel-pull reference's own harvest-timing
+    trade-off: with no season left to wait for full growth, grab whatever
+    yield exists now instead of risking it never getting harvested/sold."""
+    early = _tile(crop="WHEAT", planted_day=5, yield_units=1)
+    assert not main._is_harvestable(early, day=7, liquidating=False)  # age 2, would normally wait
+    assert main._is_harvestable(early, day=7, liquidating=True)  # same tile, liquidating -- harvest now
+
+
+def test_is_harvestable_ongoing_crop_unaffected_by_max_yield_day():
+    """TOMATO/STRAWBERRY are unaffected: their own scheduled-production
+    cadence (see _is_fertilizable's ongoing-crop note) already governs when
+    yield_units appears, so the one-time-crop maturity wait doesn't apply."""
+    tomato = _tile(crop="TOMATO", planted_day=0, yield_units=1)
+    assert main._is_harvestable(tomato, day=8, liquidating=False)  # age 8 == first_yield_day == "max_yield_day" placeholder
 
 
 def test_is_harvestable_false_when_yield_units_zero():
     empty = _tile(crop="MELON", planted_day=0, yield_units=0)
-    assert not main._is_harvestable(empty, day=20)  # long past first_yield_day, nothing to harvest though
+    assert not main._is_harvestable(empty, day=20, liquidating=False)  # long past first_yield_day, nothing to harvest though
 
 
 def test_is_fertilizable_covers_full_ongoing_crop_schedule():
@@ -321,7 +355,7 @@ def test_build_land_orders_blocked_below_utilization_gate():
     tiles = {(0, 0): _tile(), (1, 0): _tile()}  # 2 of 9 tiles planted (22%)
     farm = _farm(tiles)
     farm["money"] = 5000.0
-    orders = main._build_land_orders(farm, days_remaining=20)
+    orders = main._build_land_orders(farm, days_remaining=20, money=farm["money"])
     assert orders == []
 
 
@@ -329,29 +363,25 @@ def test_build_land_orders_buys_once_utilization_gate_is_met():
     tiles = {(x, y): _tile() for x in range(3) for y in range(2)}  # 6 of 9 planted (67%)
     farm = _farm(tiles)
     farm["money"] = 5000.0
-    orders = main._build_land_orders(farm, days_remaining=20)
+    orders = main._build_land_orders(farm, days_remaining=20, money=farm["money"])
     assert orders == [["BUY_LAND"]]
 
 
-def test_build_land_orders_buys_the_4th_quadrant_now_that_it_raises_capacity():
-    """A replay originally caught the opposite of this: under the old
-    MAX_HANDS=6, the hire formula (2*quadrants) maxed out at 3 quadrants,
-    so the 4th never unlocked another hand and buying it just spread the
-    same crew across more land for nothing -- see _land_worth_buying's own
-    docstring. `_hands_target`'s current formula (see the module
-    docstring's Real hiring pace note) was deliberately picked to keep
-    raising hire capacity all the way through 4 quadrants, so the 4th
-    *does* raise capacity again and should get bought at full utilization
-    with plenty of cash. (Task-driven hiring -- sizing the crew off actual
-    pending work instead of this flat quadrant formula -- was tried and
-    reverted regardless of this cap, see the module docstring's Task-
-    driven hiring note.)"""
+def test_build_land_orders_does_not_buy_the_4th_quadrant_under_land_quadrant_cap():
+    """`_hands_target`'s formula still raises hire capacity all the way
+    through 4 quadrants (see the module docstring's Real hiring pace note --
+    unchanged; this isn't a hand-capacity argument), but LAND_QUADRANT_CAP
+    (see the module docstring's Harvest-timing note's land-purchase-delay
+    follow-up, X578/X594 lever 1 of 4) now blocks the purchase regardless,
+    even at full utilization with plenty of cash -- mirrors the X594
+    kernel-pull reference's own `n_unl < 3` cap, which never attempts this
+    purchase at all."""
     tiles = {(x, y): _tile() for x in range(3) for y in range(3)}  # 9 of 9 planted (100%)
     farm = _farm(tiles)
     farm["unlocked_quadrants"] = ["NW", "NE", "SW"]
     farm["money"] = 50000.0
-    orders = main._build_land_orders(farm, days_remaining=20)
-    assert orders == [["BUY_LAND"]]
+    orders = main._build_land_orders(farm, days_remaining=20, money=farm["money"])
+    assert orders == []
 
 
 def test_orders_cash_cost_sums_across_order_types():
@@ -370,7 +400,7 @@ def test_orders_cash_cost_sums_across_order_types():
         ["BUY_LAND"],
         ["HIRE"],
     ]
-    cost = main._orders_cash_cost(orders, farm, prices)
+    cost = main._orders_cash_cost(orders, farm, prices, market_inventory={})
     expected = (
         2 * 30                                            # BUY_PRODUCT WHEAT x2 @ 30
         + main.CROPS["MELON"]["seed"]                      # BUY_SEED MELON
@@ -387,11 +417,29 @@ def test_orders_cash_cost_sell_orders_are_negative_revenue():
     docstring): leaving SELL out entirely was tried first and measured
     worse against reactive opponents (a purchase that only becomes
     affordable after this turn's own sell revenue lands would otherwise
-    stay chronically starved, not just delayed one turn)."""
+    stay chronically starved, not just delayed one turn). Lever 4 of 4 (see
+    the module docstring's Harvest-timing note's land-purchase-delay
+    follow-up) walks per-unit price impact instead of a flat qty * price,
+    so 4 units at WHEAT's own base price (inventory exactly at I0) nets
+    slightly under 4 * 25 = 100 before SELL_PROCEEDS_DISCOUNT (0.9) too."""
     farm = {"unlocked_quadrants": ["NW"], "hires_today": 0}
     prices = {"WHEAT": 25}
     orders = [["SELL", "WHEAT", 4]]
-    assert main._orders_cash_cost(orders, farm, prices) == -100.0
+    inventory = {"WHEAT": main.MARKET_I0}
+    cost = main._orders_cash_cost(orders, farm, prices, market_inventory=inventory)
+    assert cost == -(main._sell_proceeds("WHEAT", 4, main.MARKET_I0) * main.SELL_PROCEEDS_DISCOUNT)
+    assert cost == -87.3  # locks the actual number so a future formula change is visible here too
+
+
+def test_sell_proceeds_price_declines_across_units_in_one_order():
+    """See _sell_proceeds's own docstring: each unit sold nudges the market
+    price for the next, mirroring kaggriculture.py's own _commit_unit
+    (inventory grows per unit sold above PRICE_FLOOR). Selling above I0
+    should net LESS than a flat qty * first-unit-price estimate."""
+    inv = main.MARKET_I0
+    first_unit_price = main.market_price("WHEAT", inv)
+    total = main._sell_proceeds("WHEAT", 10, inv)
+    assert total < 10 * first_unit_price
 
 
 def _animal_tile(kind="PASTURE"):
@@ -731,14 +779,14 @@ def test_find_target_prioritizes_an_at_risk_harvestable_tile_over_a_closer_one()
     the farther one silently rots into a WEED despite being top priority."""
     board_size = 5
     tiles = [[None for _ in range(board_size)] for _ in range(board_size)]
-    safe = _tile(crop="WHEAT", planted_day=0, watered_today=True, yield_units=1)  # consecutive_unwatered=0
-    at_risk = _tile(crop="WHEAT", planted_day=0, watered_today=False, yield_units=1)  # =1, one miss from WEED
+    safe = _tile(crop="WHEAT", planted_day=0, watered_today=True, yield_units=4)  # consecutive_unwatered=0
+    at_risk = _tile(crop="WHEAT", planted_day=0, watered_today=False, yield_units=4)  # =1, one miss from WEED
     tiles[0][1] = safe  # close: (1, 0), dist=1 from (0, 0)
     tiles[4][4] = at_risk  # far: (4, 4), dist=8 from (0, 0)
     farm = {"tiles": tiles, "hands": []}
     animal_planner = main._AnimalPlanner(farm, {}, {})
     target = _resolve_target(
-        pos=[0, 0], farm=farm, day=2, board_size=board_size, inv={},  # age 2 == WHEAT's first_yield_day
+        pos=[0, 0], farm=farm, day=4, board_size=board_size, inv={},  # age 4 == WHEAT's max_yield_day, fully grown
         planner=main._CropPlanner({"seeds": {}}, farm, days_remaining=20),
         animal_planner=animal_planner, shed_tiles=set(),
         want_fertilizer=False, shed_wheat_available=False, liquidating=False,

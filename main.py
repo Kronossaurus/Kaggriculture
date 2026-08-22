@@ -1094,6 +1094,198 @@ reframing, not from another routing or crew-capacity lever -- both of those
 avenues are now reasonably well-explored for this cycle. Full validation
 log: `.omc/plans/ralplan-routing-efficiency.md` and
 `.omc/plans/ralplan-global-assignment-v2.md`.
+
+**Harvest-timing (one-time crops) -- a new, distinct bug from the WHEAT
+market-slot-starvation saga above, in the harvest decision itself rather
+than order/routing scheduling.** `_is_harvestable` treated "HARVEST is legal"
+(age >= first_yield_day) as "HARVEST is correct right now". kaggriculture.py
+actually keeps growing a one-time crop's `yield_units` for every watered day
+from `first_yield_day` through `max_yield_day` (+1/day watered, +2/day
+fertilized, capped at `max_yield`) -- for WHEAT specifically: legal at age 2
+with yield_units=1, but grows to 4 (watered) or 6 (fertilized) by age 4 if
+left alone. Harvesting the instant it was legal was locking in yield_units=1
+every time, forfeiting up to 4-6x the yield on this agent's own profit
+centre (see [[wheat-throughput-is-the-profit-centre]]) -- and wrongly
+convinced the 12th market-slot-starvation attempt that "WHEAT yields exactly
+1/harvest... max_yield evidently isn't units per harvest" (see this
+docstring's twelfth-attempt note above), when it's this agent's own harvest
+timing, not an engine property. Also explains why WHEAT's FERTILIZE almost
+never fired despite WHEAT being in `FERTILIZE_CROPS`: the fertilizer-
+delivery gate in `_find_personal_target` (`not _is_harvestable(...)`)
+excluded a tile the instant it became legally harvestable, i.e. almost its
+entire fertilizable window.
+
+Confirmed against `kaggle_environments/envs/kaggriculture/kaggriculture.py`
+directly (not just data/README.md's prose) and cross-checked against the
+X578/X594 kernel-pull reference's own harvest logic (see
+[[x578-x594-kernel-pull-benchmark]]): X594 doesn't harvest a WHEAT/CARROT
+tile until `age >= max_yield_day`, topping off with one more WATER first if
+it still helps, *except* when `day >= LAST_DAY` (its endgame trigger), where
+it harvests as soon as legal instead -- the same "wait for full yield unless
+the season is ending" trade-off. `_is_harvestable` now takes `liquidating`
+(already threaded everywhere it's called) and defers a one-time crop past
+`first_yield_day` until whichever comes first: `age >= max_yield_day`,
+`yield_units` already at `max_yield` (nothing left to gain by waiting), or
+`liquidating` (this agent's existing near-end-of-season flag, `days_remaining
+<= ENDGAME_LIQUIDATION_DAYS`) -- reusing the existing WATER/FERTILIZE
+fallback branches in `_build_tile_jobs`/`_decide_unit`/`_find_personal_target`
+unchanged, so a deferred tile is automatically kept watered (and now
+actually gets fertilized) while it waits, with no new job type needed.
+MELON is untouched in practice: its own bonus window (age 6-12) already
+saturates at or before its `first_yield_day` (10) under normal watering, so
+the new `yield_units >= max_yield` clause fires immediately for it the same
+turn the old code did.
+
+**Follow-up: the deferred-harvest fix above shifts this agent's cash-flow
+timing, and two quick fixes for the resulting land-purchase delay were both
+tried and reverted.** A same-seed paired trace (main.py vs
+`reference/main_price_reactive_seed_reserve_submitted_20260819.py`, seed 0)
+showed the 4th quadrant bought 5 days later (day 16 vs day 11) once WHEAT
+started waiting for max_yield_day before selling -- not a simple 2-day lag,
+a genuine multi-day liquidity crunch (`farm["money"]` sat below
+`SAFETY_RESERVE` for most of days 6-19 on that seed) while more land got
+planted with the same cash. A 10-seed pool check (`--engine fast`) confirmed
+this wasn't seed noise: 60.0% pool total before the harvest-timing fix,
+57.1% after it alone.
+
+1. **Loosening `LAND_UTILIZATION_GATE` (0.50 -> 0.40) did nothing and made
+   it worse** ($52,797 -> $49,352 on the traced seed, unlock day unchanged
+   at day 16). Confirms the utilization gate was never the actual
+   constraint -- `farm["money"] - SAFETY_RESERVE >= LAND_PRICES[n_extra]`
+   is. Ruled out cleanly, not just suspected.
+2. **`_standing_crop_value`: counting grown-but-unharvested one-time-crop
+   yield (yield_units * market price, 50% discount) as spendable cash for
+   the land-buy gate made the pool result worse, uniformly, not
+   noise** -- 57.1% -> 54.3% pool total, and money dropped in nearly every
+   single matchup (only `main_fertilizer_selling` held steady). The traced
+   seed's own 4th-quadrant unlock day didn't even move (still day 16); final
+   money there fell further, $52,797 -> $44,118. Likely mechanism: this
+   made the agent commit to a `BUY_LAND` order against value that wasn't
+   actually liquid yet (still needs a unit to walk, harvest, carry, sell),
+   overcommitting real spendable cash right when the land purchase itself
+   debits it -- the same kind of cascading cash-starvation this project's
+   history keeps finding this economy is unusually sensitive to (the
+   SEED_RESERVE-doubling catastrophe, the whole feed-orders-starve-market-
+   slots saga). Reverted; `_build_land_orders` is back to its original
+   2-argument, money-only form.
+
+Neither of these two "fast" attempts actually fixed the land-timing
+regression -- both are now ruled out with evidence, not just untried.
+
+3. **Threading `_build_land_orders` into the existing same-turn cash-budget
+   mechanism (`cash_reserved` -- the 16th attempt's own pattern, already
+   used by feed/seed/fertilizer/animal but not land) made the SAME traced
+   seed worse still, and in the opposite direction from the naive
+   prediction: the 4th quadrant unlocked LATER (day 20, not day 16), final
+   money fell further ($52,797 -> $35,366).** Checked the obvious
+   mechanism first (an animal starving because land now out-competes feed
+   for the same turn's incoming cash, since land is built before feed in
+   agent()'s sequence) via the trajectory trace's own `anim` column --
+   ruled out directly, live-animal count never drops (4 -> 13, monotonic,
+   no losses). The real mechanism wasn't isolated before reverting: most
+   likely land now also wins the SAME race against hire/seed for a turn's
+   arriving cash (not just feed), a slower, cumulative drag (delayed crew
+   growth -> delayed crop growth -> delayed *next* land purchase too) not
+   a single dramatic loss like a starved animal. Reverted; `_build_land_orders`
+   is back to its original 2-argument, `farm["money"]`-only form -- same as
+   after attempts 1 and 2.
+
+Three attempts at the land-purchase-delay side effect, all reverted, all
+confirmed with evidence rather than abandoned on suspicion.
+
+**A fourth angle instead: how does the X578/X594 kernel-pull reference
+itself avoid this same problem?** (See [[x578-x594-kernel-pull-benchmark]].)
+Its own land-purchase logic differs from this agent's in four ways at once,
+tested one at a time on the same traced seed (main.py vs
+`reference/main_price_reactive_seed_reserve_submitted_20260819.py`, seed 0)
+plus a 10-seed pool check (`--engine fast`), then combined:
+
+1. **`LAND_QUADRANT_CAP = 3` -- never buy the 4th quadrant at all**
+   (X594's own `n_unl < 3` gate; matches the top-ladder Tetsuya replay's
+   pattern too, see [[tetsuya-replay-analysis]]). **Kept.** Sidesteps the
+   whole regression instead of fixing it: the purchase that was starving
+   under the new cash-flow shape just never gets attempted. 10-seed pool:
+   win rate unchanged (57.1%, same as harvest-timing-fix-alone), but money
+   rose in every reactive/hard matchup and nowhere fell (x492 +14.6%,
+   `main_fertilizer_selling` +10.6% [still 100%], `main_plant_priority`
+   +10.4%, `main_price_reactive_seed_reserve` +12.6%, all 0W-10L matchups
+   unchanged in win count but meaningfully less lopsided). Traced seed:
+   $52,797 -> $53,643, `owned=75` confirms the 4th quadrant is never
+   bought.
+2. **A cash reserve that scales with operation size** (`_land_cash_reserve`:
+   per-live-animal feed buffer + a flat amount, mirroring X594's own
+   `cash_reserve = hire_total(...) + n_animals * 45 + 60`) **instead of the
+   flat `SAFETY_RESERVE`, for the land gate only.** Tested in isolation on
+   top of lever 1: no measurable change (traced seed identical, pool
+   totals within noise of lever 1 alone). Kept anyway -- more principled,
+   free given lever 1 already removed the actual cash crunch this was
+   meant to protect against.
+3. **Hire built before land** in agent()'s own sequence, mirroring X594's
+   own order, with land given the same-turn cash budget this time (unlike
+   the reverted third land-purchase-delay attempt, which gave land that
+   visibility while land still ran *before* hire -- see above). Also no
+   measurable change on top of levers 1+2 (same reasoning: lever 1 already
+   removed the crunch this was meant to fix). Kept for the same reason as
+   lever 2.
+4. **Per-unit SELL price-impact simulation** (`_sell_proceeds`, using the
+   real `market_price` imported directly from kaggriculture.py -- no risk
+   of the formula drifting the way X594's own reimplementation could) with
+   a 10% haircut (`SELL_PROCEEDS_DISCOUNT`), replacing the flat
+   `qty * current_price` estimate `_orders_cash_cost` used for every SELL
+   order, not just land's. Also no measurable change combined with 1-3.
+   Kept: strictly more accurate than the flat estimate it replaces, for
+   free once lever 1 removed the actual pain point.
+
+**All four levers combined, final pool check: still 57.1%, same win/loss
+per matchup as lever 1 alone**, confirming directly (not just by elimination)
+that lever 1 is what mattered -- levers 2-4 are real, principled precision
+improvements over the original code (none of them regress anything, all
+kept), but had nothing left to fix once lever 1 removed the actual cash
+crunch. Next: validate the full package (harvest-timing fix + all four
+land-purchase levers) at the project's full 30-seed + 2-reactive-sentinel
+protocol before treating this as done.
+
+**30-seed protocol result on the harvest-timing fix + 4 land levers, original constants:
+close but short of the bar.** `checkpoints/v0/main.py` and `reference/melon_maxxer.py` were
+dropped from `pool_winrate.py`'s own default pool at this point (2026-08-21) -- still 30/30
+shutouts each direction, no longer discriminating between changes, same reasoning as the
+2026-08-18 random/starter removal (see that script's own docstring). On the remaining
+5-opponent pool: baseline 62W-88L (41.3%), this fix 60W-90L (40.0%) -- essentially flat, but
+both reactive sentinels specifically lost a couple of already-marginal wins each
+(`main_plant_priority` 1W->0W, `main_price_reactive_seed_reserve` 3W->0W) while money rose in
+both. Doesn't clear the project's own promotion bar (match-or-beat baseline on the full pool
+*and* both sentinels specifically) as-is.
+
+**MC-search-tuning follow-up, closes the gap decisively.** Ran `scripts/mc_search.py`
+(default: 30 trials, 5 seeds x 2 opponents [x492 + fertilizer_selling], `--engine fast`) on
+top of the harvest-timing fix + all 4 land levers, varying the same 10 general-economy
+constants it always has (HANDS_BASE, HANDS_PER_QUADRANT, MAX_HANDS, LAND_UTILIZATION_GATE,
+PRICE_ATTRACTIVENESS_WEIGHT, WHEAT_SELL_THRESHOLD, FEED_MAX_PRICE_FRAC, SAFETY_RESERVE,
+FERTILIZER_MAX_PRICE_FRAC, SHED_OVERFLOW_GUARD) -- none of the harvest-timing/land-lever
+constants were in its search space this run. The search pool doesn't include either reactive
+sentinel, so its own win_rate metric (capped at 0.50 here, since x492 is unbeatable by
+constant-tuning alone and fertilizer_selling is always won) only ever ranked candidates by
+margin against x492 -- the winning trial still needed a full-pool 30-seed validation to mean
+anything for this project's actual gate, exactly as the script's own closing note warns.
+
+That validation (best-margin trial, then applied to `main.py` directly): **41.3% -> 46.7%
+(70W-80L) on the 5-opponent pool, beating baseline on the full pool AND both reactive
+sentinels specifically** -- `main_plant_priority` 1W->2W ($43,084->$52,854), `main_price_
+reactive_seed_reserve` 3W->8W ($42,267->$52,258), `x492` money alone +41% ($26,361->$37,291,
+still 0W but far less lopsided), `land_gate_60pct`/`fertilizer_selling` both up too, nowhere
+regressed. Clears the promotion bar the earlier (untuned) result missed.
+
+Applied values (all in this file, `was X` noted at each): HANDS_BASE 2->6,
+HANDS_PER_QUADRANT 3->2, MAX_HANDS unchanged at 12... [see MAX_HANDS's own comment: the
+search found 16, confirmed behaviorally identical to 12 given LAND_QUADRANT_CAP=3 -- byte-
+identical replay, same seed -- kept at 16 anyway, harmless headroom for if the land cap or
+hands formula changes later], LAND_UTILIZATION_GATE 0.50->0.493, PRICE_ATTRACTIVENESS_WEIGHT
+0.1->0.26, SELL_PARAMS["WHEAT"]["threshold"] 0.45->0.854, FEED_MAX_PRICE_FRAC 5.0->4.22,
+SAFETY_RESERVE 147->561, FERTILIZER_MAX_PRICE_FRAC 1.147->1.92, SHED_OVERFLOW_GUARD
+0.72->0.633. Largest, most legible shifts: SAFETY_RESERVE nearly 4x (real cash sits lower for
+longer between sales now, so a much bigger buffer is needed before optional buys) and the
+WHEAT sell threshold nearly doubled (holding out for a better price is worth more per unit
+now that a harvest itself is worth 4-6x more). 56/56 tests pass, lint clean.
 """
 
 from __future__ import annotations
@@ -1103,7 +1295,10 @@ from kaggle_environments.envs.kaggriculture.kaggriculture import (
     CROPS,
     LAND_ORDER,
     LAND_PRICES,
+    MARKET_I0,
     MARKET_PARAMS,
+    PRICE_FLOOR,
+    market_price,
 )
 
 # ---------------------------------------------------------------------------
@@ -1113,10 +1308,12 @@ from kaggle_environments.envs.kaggriculture.kaggriculture import (
 CASH_CROPS = ("MELON", "WHEAT", "CARROT", "TOMATO", "STRAWBERRY")
 CROP_TARGET_SHARE = {"MELON": 0.45, "WHEAT": 0.25, "CARROT": 0.15, "TOMATO": 0.10, "STRAWBERRY": 0.05}
 FERTILIZE_CROPS = {"WHEAT", "CARROT", "TOMATO", "STRAWBERRY"}
-PRICE_ATTRACTIVENESS_WEIGHT = 0.1  # how much a crop's current price (as a ratio of its
-                                    # base) pulls _CropPlanner.choose() toward it, on top
-                                    # of the target-mix-share gap -- see the module
-                                    # docstring's Price-aware planting note
+PRICE_ATTRACTIVENESS_WEIGHT = 0.26  # was 0.1; how much a crop's current price (as a ratio
+                                     # of its base) pulls _CropPlanner.choose() toward it,
+                                     # on top of the target-mix-share gap -- see the module
+                                     # docstring's Price-aware planting note for the
+                                     # original tuning, and its Harvest-timing note's
+                                     # MC-search-tuning follow-up for this value
 
 PLANT_PRIORITY = 4  # _find_target's base priority for planting an empty tile -- see
                      # the module docstring's Land / hands note
@@ -1166,12 +1363,20 @@ FERTILIZER_STOCKPILE_RESERVE = 10  # reserve target while price is cheap -- see 
 FERTILIZER_CHEAP_PRICE_FRAC = 0.35  # price <= this fraction of base triggers stockpiling.
                                      # Deliberately well below SELL_PARAMS["FERTILIZER"]'s own
                                      # 0.50 sell threshold -- see the same docstring note
-FERTILIZER_MAX_PRICE_FRAC = 1.147  # don't buy fertilizer more than ~15% over base --
-                                    # was 1.2; MC search (2026-08-20, scripts/mc_search.py,
-                                    # paired jointly with SAFETY_RESERVE/SHED_OVERFLOW_GUARD)
-                                    # found this, validated at full-pool 30-seed A/B: 71.9%->
-                                    # 74.8% win rate, +$1.2-1.5k mean margin, improves on both
-                                    # reactive self-play sentinels, regresses nowhere
+FERTILIZER_MAX_PRICE_FRAC = 1.92  # don't buy fertilizer more than ~92% over base -- was
+                                   # 1.147 (before that 1.2; see below for that history). MC
+                                   # search (2026-08-20, scripts/mc_search.py, paired jointly
+                                   # with SAFETY_RESERVE/SHED_OVERFLOW_GUARD) found 1.147,
+                                   # validated at full-pool 30-seed A/B: 71.9%->74.8% win
+                                   # rate, +$1.2-1.5k mean margin, improved on both reactive
+                                   # self-play sentinels, regressed nowhere. That search
+                                   # predates the harvest-timing fix; a follow-up MC search
+                                   # (see the module docstring's Harvest-timing note) re-tuned
+                                   # this and 9 other constants together on top of the fix +
+                                   # all 4 land-purchase levers, found 1.92, validated at
+                                   # full-pool 30-seed A/B: 41.3%->46.7%, improves on both
+                                   # reactive sentinels again (1W->2W, 3W->8W), regresses
+                                   # nowhere -- see that note for the full result table.
 
 SELL_PARAMS = {
     # threshold: fraction of base price required to sell at all -- see
@@ -1179,7 +1384,12 @@ SELL_PARAMS = {
     # _CropPlanner and _AnimalPlanner's own _price_ok, so a crop/animal
     # kind's plant/build eligibility always matches its sell eligibility.
     "MELON":      {"threshold": 0.65},
-    "WHEAT":      {"threshold": 0.45},
+    "WHEAT":      {"threshold": 0.854},  # was 0.45 -- see the module docstring's Harvest-
+                                          # timing note's MC-search-tuning follow-up. A much
+                                          # higher bar to sell at all now that a WHEAT
+                                          # harvest is worth 4-6x more per tile (deferred to
+                                          # max_yield_day): holding out for a better price is
+                                          # worth more per unit than it used to be.
     "CARROT":     {"threshold": 0.45},
     "TOMATO":     {"threshold": 0.50},
     "STRAWBERRY": {"threshold": 0.55},
@@ -1194,8 +1404,9 @@ SELL_PARAMS = {
 }
 
 SHED_CAPACITY = 100  # data/README.md default; not exposed in `obs`
-SHED_OVERFLOW_GUARD = 0.72  # start dumping regardless of price above this fraction full --
-                             # was 0.85; see FERTILIZER_MAX_PRICE_FRAC's note, same MC search
+SHED_OVERFLOW_GUARD = 0.633  # start dumping regardless of price above this fraction full --
+                              # was 0.72 (before that 0.85); see FERTILIZER_MAX_PRICE_FRAC's
+                              # note for both MC searches this was tuned in
 
 ANIMAL_KINDS = ("COW", "SHEEP", "GOOSE")
 ANIMAL_PRODUCT = {"COW": "MILK", "SHEEP": "WOOL", "GOOSE": "EGG"}
@@ -1220,11 +1431,14 @@ ANIMAL_RESERVE = 1  # spare bought-but-not-yet-placed animal tokens to keep queu
                     # some games; see _build_animal_orders's own "Known bug" note
 FEED_RESERVE_PER_ANIMAL = 2  # days of WHEAT buffer per live animal, bought directly from
                               # the market -- see _build_feed_orders for why
-FEED_MAX_PRICE_FRAC = 5.0  # a near-nonbinding backstop, not a real cap: missing a feed
-                            # loses the whole animal ($300-500+), dwarfing even a wildly
-                            # inflated wheat price -- see the module docstring's WHEAT
-                            # sell/rebuy round trip note for why a tighter cap is a trap
-                            # (below ~1.4x base, animals starve outright in testing)
+FEED_MAX_PRICE_FRAC = 4.22  # was 5.0; a near-nonbinding backstop, not a real cap: missing
+                             # a feed loses the whole animal ($300-500+), dwarfing even a
+                             # wildly inflated wheat price -- see the module docstring's
+                             # WHEAT sell/rebuy round trip note for why a tighter cap is a
+                             # trap (below ~1.4x base, animals starve outright in testing).
+                             # 4.22 is from the Harvest-timing note's MC-search-tuning
+                             # follow-up -- still well above that danger zone, same
+                             # near-nonbinding role
 WHEAT_SELL_RESERVE_DAYS = 3  # 18th market-order-slot-starvation attempt (see the module
                               # docstring and .omc/plans/ralplan-wheat-feed-consolidation.md):
                               # _build_sell_orders holds back live_animals * min(this,
@@ -1246,42 +1460,64 @@ FARM_HAND_COST_MULT = 1  # data/README.md default; mirrors kaggriculture.py's ow
                           # used only to estimate HIRE's own same-turn cash draw -- see
                           # _orders_cash_cost
 
-HANDS_BASE = 2  # hands hired even at the starting NW quadrant alone
-HANDS_PER_QUADRANT = 3
-MAX_HANDS = 12  # was 6, briefly 8; see the module docstring's Land / hands note --
-                # a real top-ladder replay showed 5 hands on day 0 with 1 quadrant and
-                # 10-12 sustained for the rest of the season, nothing like the old
-                # `2 * quadrants` formula's pace. HANDS_BASE/HANDS_PER_QUADRANT/
-                # MAX_HANDS were picked so _hands_target(quadrants) tracks that curve
-                # (5/8/11/12 at 1-4 quadrants) while staying strictly increasing
-                # through all 4 quadrants, so _land_worth_buying never blocks the 4th.
-                # RE-TESTED at 14 (18th attempt, step 2 -- see .omc/plans/ralplan-wheat-feed-
-                # consolidation.md) specifically to check whether pairing it with the sell-
-                # side WHEAT reserve (unlike the original 17th-attempt pairing, which had no
-                # sell-side reserve and never actually exercised the 4-quadrant tier) changed
-                # the outcome. It didn't: worse across the board (tape_kiro $22,084->$8,788;
-                # reactive sentinel 5-seed money down in all 5, one seed collapsing to
-                # $2,095) -- and a trajectory trace showed why it's the wrong lever, not just
-                # a worse one: weed count with 14 hands still hit 17/100 tiles by day 26,
-                # essentially unchanged from 12 hands' own 10-18 -- the extra hires' cost
-                # (fib-priced, steep at this count) ate cash during an already tight stretch
-                # without meaningfully improving tending throughput. Reverted to 12. The
-                # underlying weed-neglect problem this was meant to fix is real (see the
-                # plan's validation-result section) but isn't a headcount problem -- next
-                # candidate is the assignment/routing logic itself, not crew size.
-SAFETY_RESERVE = 147  # cash kept in reserve before optional buys/land/fertilizer -- was
-                       # 300; see FERTILIZER_MAX_PRICE_FRAC's note, same MC search
+HANDS_BASE = 6  # was 2; see the module docstring's Harvest-timing note's MC-search-tuning
+                 # follow-up -- found by scripts/mc_search.py paired with the other 9 knobs
+                 # below, on top of the harvest-timing fix + all 4 land-purchase levers
+HANDS_PER_QUADRANT = 2  # was 3, same search. NOTE: the *design intent* behind this pair --
+                         # "picked so _hands_target(quadrants) stays strictly increasing
+                         # through all 4 quadrants, so _land_worth_buying never blocks the
+                         # 4th" (this comment's own prior text) -- no longer applies:
+                         # LAND_QUADRANT_CAP=3 means quadrants never reaches 4 at all. See
+                         # MAX_HANDS below for how that's reconciled, not left conflicting.
+MAX_HANDS = 16  # the raw MC search value, kept as-searched rather than reconciled down to
+                 # 12: at HANDS_BASE=6, HANDS_PER_QUADRANT=2, LAND_QUADRANT_CAP=3,
+                 # _hands_target(quadrants) is 8/10/12 at 1/2/3 quadrants and never goes
+                 # higher today (4 quadrants is never reached), so 16 is untested headroom
+                 # past a ceiling that can't currently be hit -- confirmed behaviorally
+                 # identical to 12 (byte-identical replay, same seed/opponent, both values).
+                 # Deliberately left at 16 rather than 12: harmless now, and ready without
+                 # a further edit if LAND_QUADRANT_CAP or the hands formula ever changes.
+                 # (History: was 6, briefly 8, then 12 -- see the module docstring's Land /
+                 # hands note for that tuning; RE-TESTED at 14 in the 18th attempt and
+                 # reverted, worse across the board -- see .omc/plans/ralplan-wheat-feed-
+                 # consolidation.md. That history predates LAND_QUADRANT_CAP and the
+                 # harvest-timing fix, so treat it as background, not a constraint on
+                 # retuning this value again if the land cap or hands formula ever changes.)
+SAFETY_RESERVE = 561  # cash kept in reserve before optional buys/land/fertilizer -- was 147
+                       # (before that, 300; see FERTILIZER_MAX_PRICE_FRAC's note for that
+                       # earlier MC search). This new value is from the module docstring's
+                       # Harvest-timing note's MC-search-tuning follow-up: with the
+                       # harvest-timing fix holding wheat longer before selling, real cash
+                       # sits lower for longer between sales, so a much bigger reserve is
+                       # needed before optional buys, not a smaller one.
 MAX_MARKET_ORDERS = 10  # data/README.md default; not exposed in `obs`
 
 DEFAULT_EPISODE_STEPS = 720  # data/README.md defaults, used if `config` is unavailable
 DEFAULT_TURNS_PER_DAY = 24
 SEED_BUFFER_DAYS = 1  # a crop needs first_yield_day + this many days left to be worth planting
 LAND_CUTOFF_DAYS = 5  # stop buying new land this close to the end, it won't pay back in time
-LAND_UTILIZATION_GATE = 0.50  # don't buy the next quadrant until this much of what we
-                               # already own is planted -- see the module docstring's
-                               # Land / hands note. Still below the ~48-56%
-                               # achievable-utilization ceiling observed in real replays
-                               # (0.6 deadlocked against it), just less borderline than 0.45
+LAND_UTILIZATION_GATE = 0.493  # was 0.50; don't buy the next quadrant until this much of
+                                # what we already own is planted -- see the module
+                                # docstring's Land / hands note for the original tuning
+                                # (0.6 deadlocked against a ~48-56% achievable-utilization
+                                # ceiling in real replays). This value is from the Harvest-
+                                # timing note's MC-search-tuning follow-up -- barely moved
+                                # from 0.50, well within the same safe range.
+LAND_QUADRANT_CAP = 3  # never buy the 4th quadrant -- see the module docstring's Harvest-timing
+                        # note's land-purchase-delay follow-up: the X578/X594 kernel-pull
+                        # reference never attempts this purchase at all (`n_unl < 3` in its own
+                        # land logic), sidestepping the exact regression three narrower attempts
+                        # here all failed to fix. Lever 1 of 4 from that reference -- kept, tested
+                        # in isolation (10-seed pool: money up in every reactive matchup, flat
+                        # elsewhere, win rate unchanged). Levers 2-4 (dynamic reserve, hire-before-
+                        # land ordering, per-unit sell simulation) tested one at a time, then
+                        # combined -- see LAND_RESERVE_PER_ANIMAL/LAND_RESERVE_FLAT for lever 2.
+LAND_RESERVE_PER_ANIMAL = 45  # lever 2 of 4, see _land_cash_reserve -- X594's own value, not
+                               # yet retuned for this agent's economy
+LAND_RESERVE_FLAT = 60  # lever 2 of 4, see _land_cash_reserve -- X594's own value, not yet
+                         # retuned for this agent's economy
+SELL_PROCEEDS_DISCOUNT = 0.9  # lever 4 of 4, see _sell_proceeds -- X594's own value, not yet
+                               # retuned for this agent's economy
 ENDGAME_LIQUIDATION_DAYS = 2  # ignore the sell-price threshold this close to the end
 
 
@@ -1401,17 +1637,42 @@ def _any_unfed_animal(farm):
     return any(_is_animal_tile(tile) and not tile.get("fed_today") for row in farm["tiles"] for tile in row)
 
 
-def _is_harvestable(tile, day):
+def _is_harvestable(tile, day, liquidating):
     """yield_units > 0 alone is NOT "ready" for one-time crops: `_new_plant`
     seeds it at 1 immediately on planting (kaggriculture.py), but HARVEST is
     still a no-op until `first_yield_day` (age 2 for wheat/carrot, 10 for
     melon). Confusing the two makes a unit spam a no-op HARVEST instead of
-    WATER, and the crop dies to neglect before ever becoming harvestable."""
+    WATER, and the crop dies to neglect before ever becoming harvestable.
+
+    Past `first_yield_day`, a one-time crop (wheat/carrot/melon) is legal to
+    harvest but NOT yet done growing -- see the module docstring's
+    Harvest-timing note: kaggriculture.py keeps adding yield_units for every
+    watered day through `max_yield_day` (+2/day if fertilized), capped at
+    `max_yield`. Treating "legal" as "should harvest now" was locking in
+    yield_units=1 the instant it was legal, forfeiting up to 4-6x the yield
+    for wheat. This now defers harvest of a one-time crop already past
+    first_yield_day until whichever comes first: it's fully matured
+    (`age >= max_yield_day`), it's already hit its yield cap (nothing left to
+    gain by waiting), or the season is ending (`liquidating`) and there's no
+    time left to wait -- the same early-harvest trade-off the X594
+    kernel-pull reference makes (see [[x578-x594-kernel-pull-benchmark]]).
+    Ongoing crops (tomato/strawberry) are unaffected: their own scheduled-
+    production cadence already governs when yield_units appears."""
     if not isinstance(tile, dict) or tile.get("yield_units", 0) <= 0:
         return False
     if tile.get("kind") != "PLANT":
         return True  # animal structures have no such gate; out of scope here anyway
-    return day - tile["planted_day"] >= CROPS[tile["crop"]]["first_yield_day"]
+    crop_data = CROPS[tile["crop"]]
+    age = day - tile["planted_day"]
+    if age < crop_data["first_yield_day"]:
+        return False
+    if crop_data["ongoing"]:
+        return True
+    return (
+        age >= crop_data["max_yield_day"]
+        or tile["yield_units"] >= crop_data["max_yield"]
+        or liquidating
+    )
 
 
 class _CropPlanner:
@@ -1667,7 +1928,7 @@ def _find_personal_target(
                     # matches _find_target's old elif chain: only reachable once the tile is
                     # neither harvestable nor unwatered (those are tile-only, in the shared pool)
                     if (carries_fertilizer and tile.get("watered_today")
-                            and not _is_harvestable(tile, day) and _is_fertilizable(tile, day)):
+                            and not _is_harvestable(tile, day, liquidating) and _is_fertilizable(tile, day)):
                         candidates.append((x, y, 3, dist))  # deliver fertilizer
                 elif _is_animal_tile(tile):
                     # same elif-chain fidelity: FEED only applies once yield_units<=0 (a
@@ -1735,7 +1996,7 @@ def _build_tile_jobs(farm, day, board_size, claimed, animal_zone, quadrant_util,
                 continue
             tile = farm["tiles"][y][x]
             if _is_plant(tile):
-                if _is_harvestable(tile, day):
+                if _is_harvestable(tile, day, liquidating):
                     # See the module docstring's Harvest-ready tiles rotting to weeds note:
                     # priority stays 0 either way (already top tier); the bias only breaks
                     # ties within it, favoring a tile one missed watering from becoming a WEED.
@@ -1847,7 +2108,7 @@ def _decide_unit(
     tile = farm["tiles"][fy][fx]
 
     if _is_plant(tile):
-        if _is_harvestable(tile, day):
+        if _is_harvestable(tile, day, liquidating):
             claimed.add((fx, fy))
             return ["HARVEST"]
         if not tile["watered_today"]:
@@ -2046,7 +2307,26 @@ def _fib(n):
     return a
 
 
-def _orders_cash_cost(orders, farm, prices):
+def _sell_proceeds(item, qty, inventory):
+    """X578/X594 kernel-pull reference lever 4 of 4 (see the module docstring's Harvest-timing
+    note's land-purchase-delay follow-up): walks price impact unit-by-unit using the real
+    `market_price` (imported directly from kaggriculture.py, not reimplemented the way X594's
+    own copy is -- no risk of the two formulas drifting apart) instead of a flat
+    `qty * current_price` snapshot, which overestimates revenue on a large SELL order since
+    each unit sold nudges the price down (or up toward base, below I0) for the next. Mirrors
+    kaggriculture.py's own `_commit_unit`: market inventory only grows for a unit sold above
+    PRICE_FLOOR (a sale at the floor doesn't move the price further)."""
+    inv = inventory
+    total = 0
+    for _ in range(qty):
+        price = market_price(item, inv)
+        total += price
+        if price > PRICE_FLOOR:
+            inv += 1
+    return total
+
+
+def _orders_cash_cost(orders, farm, prices, market_inventory):
     """16th market-order-slot-starvation attempt: estimate the total cash
     a list of market orders will draw from farm["money"] this turn, using
     this turn's opening prices/counts -- the same approximation each
@@ -2082,7 +2362,13 @@ def _orders_cash_cost(orders, farm, prices):
     both roughly halved) even while it helped substantially against
     tape_kiro once paired with the 14th attempt's feed consolidation (0%
     -> 23.3%) -- see the module docstring's Same-turn cash competition
-    note for the full comparison."""
+    note for the full comparison.
+
+    `market_inventory` (lever 4 of 4, see `_sell_proceeds`) replaces the flat
+    `qty * current_price` SELL estimate with a per-unit price-impact walk, discounted by
+    `SELL_PROCEEDS_DISCOUNT` -- a large SELL order was otherwise overestimating its own
+    proceeds, since one flat price ignores that each unit sold pushes the next one's price
+    down."""
     total = 0.0
     n_extra = len(farm["unlocked_quadrants"]) - 1
     hires_so_far = farm["hires_today"]
@@ -2091,8 +2377,8 @@ def _orders_cash_cost(orders, farm, prices):
         if op == "SELL":
             item = order[1]
             qty = order[2] if len(order) > 2 else 1
-            base = MARKET_PARAMS[item]["base"]
-            total -= qty * prices.get(item, base)
+            inv = market_inventory.get(item, MARKET_I0)
+            total -= _sell_proceeds(item, qty, inv) * SELL_PROCEEDS_DISCOUNT
         elif op == "BUY_PRODUCT":
             item = order[1]
             qty = order[2] if len(order) > 2 else 1
@@ -2116,16 +2402,36 @@ def _orders_cash_cost(orders, farm, prices):
     return total
 
 
-def _build_land_orders(farm, days_remaining):
+def _land_cash_reserve(farm):
+    """X578/X594 kernel-pull reference lever 2 of 4 (see the module docstring's Harvest-timing
+    note's land-purchase-delay follow-up): a reserve that scales with the size of the
+    operation, not a flat constant -- a per-live-animal feed buffer plus a small flat amount,
+    mirroring X594's own `cash_reserve = hire_total(...) + n_animals * 45 + 60` structurally
+    (values not yet retuned for this agent's own economy -- starting from X594's as a first
+    guess). The hire-cost term X594 also includes is intentionally left out here: lever 3
+    (hire-before-land ordering, see agent()'s own comment) threads hire's REAL same-turn cost
+    into the `money` this function's caller passes in, via the existing `cash_reserved`
+    mechanism -- more precise than re-estimating it here too, and double-counting it in both
+    places would over-reserve."""
+    return _live_animal_count(farm) * LAND_RESERVE_PER_ANIMAL + LAND_RESERVE_FLAT
+
+
+def _build_land_orders(farm, days_remaining, money):
+    """`money` is the caller's same-turn cash budget -- see agent()'s own comment on why hire
+    now runs before land in the build sequence (lever 3 of 4): unlike the reverted third
+    land-purchase-delay attempt (module docstring), which gave land visibility into a turn's
+    incoming SELL proceeds while land still ran BEFORE hire/seed in the sequence (so land won
+    the race for that cash instead of losing it, worse than before), hire now claims its own
+    real same-turn cost first, and land only sees what's left."""
     if days_remaining < LAND_CUTOFF_DAYS:
         return []  # a fresh quadrant can't earn back its cost this close to the end
     quadrants_now = len(farm["unlocked_quadrants"])
     n_extra = quadrants_now - 1  # NW is always owned
-    if n_extra >= len(LAND_ORDER) or not _land_worth_buying(quadrants_now):
+    if quadrants_now >= LAND_QUADRANT_CAP or n_extra >= len(LAND_ORDER) or not _land_worth_buying(quadrants_now):
         return []
     if _land_utilization(farm) < LAND_UTILIZATION_GATE:
         return []  # can't staff what we already own -- more land would just sit idle
-    if farm["money"] - SAFETY_RESERVE >= LAND_PRICES[n_extra]:
+    if money - _land_cash_reserve(farm) >= LAND_PRICES[n_extra]:
         return [["BUY_LAND"]]
     return []
 
@@ -2398,7 +2704,9 @@ def agent(obs, config=None):
     days_remaining = last_day - day
     liquidating = days_remaining <= ENDGAME_LIQUIDATION_DAYS
 
-    market_prices = (obs.get("market", {}) or {}).get("prices", {})
+    market_obs = obs.get("market", {}) or {}
+    market_prices = market_obs.get("prices", {})
+    market_inventory = market_obs.get("inventory", {})
     seeds = private.get("seeds", {})
     shed = private.get("shed", {})
     inventories = private.get("inventories", [{}])
@@ -2490,29 +2798,35 @@ def agent(obs, config=None):
     market = []
     sell_orders = _build_sell_orders(shed, market_prices, days_remaining, farm)
     market += sell_orders
-    cash_reserved = _orders_cash_cost(sell_orders, farm, market_prices)  # negative: SELL earns
+    cash_reserved = _orders_cash_cost(sell_orders, farm, market_prices, market_inventory)  # negative: SELL earns
 
-    land_orders = _build_land_orders(farm, days_remaining)
-    market += land_orders
-    cash_reserved += _orders_cash_cost(land_orders, farm, market_prices)
-
+    # Lever 3 of 4 (see the module docstring's Harvest-timing note's land-purchase-delay
+    # follow-up): hire now runs before land, mirroring the X578/X594 kernel-pull reference's
+    # own build order. The reverted third land-purchase-delay attempt gave land visibility
+    # into this turn's own SELL proceeds while land still ran first, so land won the race for
+    # that cash against hire/seed instead of losing to their staleness the way it used to --
+    # worse, not better. Hire claims its own real cost first now; land only sees what's left.
     hire_orders = _build_hire_orders(farm)
     market += hire_orders
-    cash_reserved += _orders_cash_cost(hire_orders, farm, market_prices)
+    cash_reserved += _orders_cash_cost(hire_orders, farm, market_prices, market_inventory)
+
+    land_orders = _build_land_orders(farm, days_remaining, farm["money"] - cash_reserved)
+    market += land_orders
+    cash_reserved += _orders_cash_cost(land_orders, farm, market_prices, market_inventory)
 
     feed_orders = _build_feed_orders(farm, private, market_prices, farm["money"] - cash_reserved)
     market += feed_orders
-    cash_reserved += _orders_cash_cost(feed_orders, farm, market_prices)
+    cash_reserved += _orders_cash_cost(feed_orders, farm, market_prices, market_inventory)
 
     seed_orders = _build_seed_orders(seeds, farm["money"] - cash_reserved, days_remaining, market_prices)
     market += seed_orders
-    cash_reserved += _orders_cash_cost(seed_orders, farm, market_prices)
+    cash_reserved += _orders_cash_cost(seed_orders, farm, market_prices, market_inventory)
 
     fertilizer_orders = _build_fertilizer_orders(
         private, market_prices, farm["money"] - cash_reserved, want_fertilizer
     )
     market += fertilizer_orders
-    cash_reserved += _orders_cash_cost(fertilizer_orders, farm, market_prices)
+    cash_reserved += _orders_cash_cost(fertilizer_orders, farm, market_prices, market_inventory)
 
     market += _build_animal_orders(farm, private, farm["money"] - cash_reserved)
     market = market[:MAX_MARKET_ORDERS]

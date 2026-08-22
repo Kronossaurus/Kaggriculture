@@ -6,10 +6,8 @@ one baseline." Every prior evaluation in this project (`run_local.py`,
 this is the missing piece.
 
 Default pool is every scripted reference agent in this repo worth
-tracking (`checkpoints/v0/main.py`, the original one-tile wheat loop;
-`reference/melon_maxxer.py`, Kaggle's own official single-crop example;
-`reference/x492_nah_i_d_win.py`, a strong external agent pulled from Kaggle
-Kernels for comparison only -- not ours, never submit it; and
+tracking (`reference/x492_nah_i_d_win.py`, a strong external agent pulled
+from Kaggle Kernels for comparison only -- not ours, never submit it; and
 `reference/main_land_gate_60pct.py`, a frozen ablation of main.py itself --
 see its own docstring for the land-utilization-gate trade-off it tracks;
 `reference/main_fertilizer_selling_submitted_20260817.py`, a frozen
@@ -28,7 +26,13 @@ hand-picked ablations.
 the default (2026-08-18): every main.py revision this session has beaten
 both 10/10 seeds by a wide margin, so they no longer discriminate between
 changes -- pass `--pool random starter` explicitly if a fresh sanity check
-against them is ever needed again.
+against them is ever needed again. `checkpoints/v0/main.py` (the original
+one-tile wheat loop) and `reference/melon_maxxer.py` (Kaggle's own official
+single-crop example) were dropped from the default the same way
+(2026-08-21): still 30/30 shutouts each direction at the harvest-timing
+investigation's own 30-seed check, no longer discriminating between
+changes either -- pass `--pool checkpoints/v0/main.py
+reference/melon_maxxer.py` explicitly if ever needed again.
 No RL checkpoint is included -- see rl/README.md, none survive the current
 action space.
 
@@ -52,8 +56,6 @@ sys.path.insert(0, str(SCRIPT_DIR))
 from run_local import resolve_agent  # noqa: E402
 
 DEFAULT_POOL = [
-    "checkpoints/v0/main.py",
-    "reference/melon_maxxer.py",
     "reference/x492_nah_i_d_win.py",
     "reference/main_land_gate_60pct.py",
     "reference/main_fertilizer_selling_submitted_20260817.py",
