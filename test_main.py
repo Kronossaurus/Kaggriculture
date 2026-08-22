@@ -196,13 +196,10 @@ def test_decide_unit_digs_a_weed_instead_of_stalling():
 
 
 def test_decide_unit_drops_surplus_fertilizer_at_the_shed():
-    """See the module docstring's Selling fertilizer note: FERTILIZER
-    collected from animal structures used to be excluded from "carried
-    produce" unconditionally, so once nothing was left to fertilize a unit
-    holding surplus collected FERTILIZER had no candidate to chase at all
-    and just sat on it for the rest of the game instead of banking it in
-    the shed to sell. A unit standing at the shed with no fertilizable crop
-    anywhere should drop it, not PASS."""
+    """FERTILIZER used to be excluded from "carried produce" unconditionally,
+    so once nothing was left to fertilize a unit just sat on surplus
+    collected FERTILIZER forever instead of banking it. A unit at the shed
+    with no fertilizable crop anywhere should drop it, not PASS."""
     farm = _farm({})  # no plant tiles anywhere -> nothing is fertilizable
     claimed = set()
     planner = main._CropPlanner({"seeds": {}}, farm, days_remaining=20)
@@ -216,20 +213,11 @@ def test_decide_unit_drops_surplus_fertilizer_at_the_shed():
 
 
 def test_decide_unit_keeps_freshly_picked_up_fertilizer_when_still_needed():
-    """The regression the first version of the fix above caused (see the
-    module docstring's Selling fertilizer note): a unit standing at the
-    shed holding FERTILIZER it just fetched for delivery must NOT
-    immediately DROP it back the moment want_fertilizer is still true, or
-    every fertilizer pickup livelocks PICKUP/DROP forever -- a 10-seed pool
-    comparison with that version collapsed mean money from ~$36-38k to
-    ~$2,290 against `random` alone.
-
-    `_decide_unit` itself no longer walks (that's agent()'s job now, via
-    `_find_personal_target` -- see the module docstring's Routing efficiency
-    note): confirm it doesn't DROP (returns None, not an action, since (0,0)
-    is a shed tile with nothing to do standing still), and separately that
-    the unit's personal target really is the fertilizable tile, not the shed
-    itself -- i.e. it would walk to deliver, not livelock on DROP."""
+    """A unit standing at the shed holding just-fetched FERTILIZER must NOT
+    immediately DROP it while still needed, or PICKUP/DROP livelocks forever
+    (an earlier version did exactly this, a real regression). Confirm no
+    DROP action and that the personal target is the fertilizable tile, not
+    the shed."""
     farm = _farm_with_one_fertilizable_tile()
     planner = main._CropPlanner({"seeds": {}}, farm, days_remaining=20)
     animal_planner = main._AnimalPlanner(farm, {}, {})
@@ -248,17 +236,11 @@ def test_decide_unit_keeps_freshly_picked_up_fertilizer_when_still_needed():
 
 
 def test_decide_unit_keeps_freshly_picked_up_wheat_below_the_threshold():
-    """Same livelock family as the FERTILIZER test above, for WHEAT (12th
-    market-order-slot-starvation attempt, see the module docstring): a
-    unit standing at the shed holding a freshly PICKUP'd WHEAT batch for
-    animal feed (up to 4 units -- see _decide_unit's own PICKUP WHEAT
-    call) must NOT immediately DROP it back, or every feed pickup
-    livelocks PICKUP/DROP forever. This was the actual bug behind the
-    11th attempt's weed-count explosion (8->34 of 75 tiles) -- diffing
-    that replay against a corrected one showed only 1 of 720 turns
-    differed, proving it wasn't a trip-generation issue at all.
-    WHEAT_SHED_RETURN_THRESHOLD=5 must exceed PICKUP's 4-unit cap for
-    this guard to actually hold."""
+    """Same livelock family as the FERTILIZER test above, for WHEAT: a unit
+    holding a freshly PICKUP'd feed batch (up to 4 units) must NOT
+    immediately DROP it back, or every feed pickup livelocks forever.
+    WHEAT_SHED_RETURN_THRESHOLD=5 must exceed PICKUP's 4-unit cap for this
+    guard to actually hold."""
     farm = _farm({})
     planner = main._CropPlanner({"seeds": {}}, farm, days_remaining=20)
     animal_planner = main._AnimalPlanner(farm, {}, {})
@@ -354,12 +336,9 @@ def test_build_sell_orders_holds_below_threshold():
 
 
 def test_build_sell_orders_holds_back_a_wheat_reserve_for_live_animals():
-    """18th market-order-slot-starvation attempt (see the module docstring
-    and .omc/plans/ralplan-wheat-feed-consolidation.md): with live animals
-    on the farm, WHEAT sells shed-qty minus `live * min(WHEAT_SELL_RESERVE_
-    DAYS, days_remaining)` instead of the full shed -- mirrors the X594
-    kernel-pull reference's own reserve shape. 2 animals, days_remaining=20
-    (>= WHEAT_SELL_RESERVE_DAYS=3) -> reserve = 2*3 = 6."""
+    """With live animals on the farm, WHEAT sells shed-qty minus
+    `live * min(WHEAT_SELL_RESERVE_DAYS, days_remaining)` instead of the
+    full shed. 2 animals, days_remaining=20 -> reserve = 2*3 = 6."""
     farm = _farm({(0, 0): _animal_tile(), (1, 0): _animal_tile()})
     shed = {"WHEAT": 20}
     prices = {"WHEAT": 30}
@@ -431,14 +410,9 @@ def test_build_land_orders_buys_once_utilization_gate_is_met():
 
 
 def test_build_land_orders_does_not_buy_the_4th_quadrant_under_land_quadrant_cap():
-    """`_hands_target`'s formula still raises hire capacity all the way
-    through 4 quadrants (see the module docstring's Real hiring pace note --
-    unchanged; this isn't a hand-capacity argument), but LAND_QUADRANT_CAP
-    (see the module docstring's Harvest-timing note's land-purchase-delay
-    follow-up, X578/X594 lever 1 of 4) now blocks the purchase regardless,
-    even at full utilization with plenty of cash -- mirrors the X594
-    kernel-pull reference's own `n_unl < 3` cap, which never attempts this
-    purchase at all."""
+    """LAND_QUADRANT_CAP blocks a 4th-quadrant purchase outright, even at
+    full utilization with plenty of cash (`_hands_target`'s own formula
+    would otherwise still raise hire capacity for it)."""
     tiles = {(x, y): _tile() for x in range(3) for y in range(3)}  # 9 of 9 planted (100%)
     farm = _farm(tiles)
     farm["unlocked_quadrants"] = ["NW", "NE", "SW"]
@@ -476,15 +450,12 @@ def test_orders_cash_cost_sums_across_order_types():
 
 def test_orders_cash_cost_sell_orders_are_negative_revenue():
     """SELL orders earn money rather than spend it, so they contribute a
-    negative amount -- the second version of this function (see its
-    docstring): leaving SELL out entirely was tried first and measured
-    worse against reactive opponents (a purchase that only becomes
+    negative amount to the cash-cost estimate (leaving SELL out entirely was
+    tried first and measured worse -- a purchase that only becomes
     affordable after this turn's own sell revenue lands would otherwise
-    stay chronically starved, not just delayed one turn). Lever 4 of 4 (see
-    the module docstring's Harvest-timing note's land-purchase-delay
-    follow-up) walks per-unit price impact instead of a flat qty * price,
-    so 4 units at WHEAT's own base price (inventory exactly at I0) nets
-    slightly under 4 * 25 = 100 before SELL_PROCEEDS_DISCOUNT (0.9) too."""
+    stay chronically starved). Walks per-unit price impact instead of a
+    flat qty * price, so 4 units at WHEAT's base price nets slightly under
+    4*25=100 before SELL_PROCEEDS_DISCOUNT (0.9)."""
     farm = {"unlocked_quadrants": ["NW"], "hires_today": 0}
     orders = [["SELL", "WHEAT", 4]]
     inventory = {"WHEAT": main.MARKET_I0}
@@ -531,18 +502,11 @@ def test_build_feed_orders_skipped_when_reserve_already_met():
 
 
 def test_build_feed_orders_counts_carried_wheat_and_consolidates_into_one_order():
-    """18th market-order-slot-starvation attempt (see the module docstring
-    and .omc/plans/ralplan-wheat-feed-consolidation.md). Supersedes this
-    test's own prior version, which locked the *opposite* behavior (ignoring
-    carried WHEAT, one order per unit of shortfall) as the 17th attempt's
-    deliberately-reverted shape -- carried-inclusive accounting alone was a
-    real regression back then (cut WHEAT sales 70% along with purchases,
-    reactive sentinels 51.7% -> 3.3%). This time it's paired with
-    `_build_sell_orders`'s own new WHEAT reserve rather than an unchanged
-    sell side, mirroring the X594 kernel-pull reference's combination --
-    unvalidated as of this commit, see the plan for status. 1 animal ->
-    reserve = 2 (FEED_RESERVE_PER_ANIMAL); shed 0 + carried 3 already covers
-    it, so no order at all now (the old shed-only accounting would have
+    """The 18th WHEAT-consolidation attempt (kept despite a measured
+    regression, see main.py's docstring): feed reserve now counts carried
+    inventory, not just shed stock, and consolidates into one order. 1
+    animal -> reserve=2 (FEED_RESERVE_PER_ANIMAL); shed 0 + carried 3
+    already covers it, so no order at all (shed-only accounting would have
     still requested 2)."""
     farm = _farm({(0, 0): _animal_tile()})  # 1 animal -> reserve = 2
     private = {"shed": {"WHEAT": 0}, "inventories": [{"WHEAT": 3}]}
@@ -677,13 +641,10 @@ def test_crop_planner_balances_toward_target_share():
 
 
 def test_crop_planner_avoids_depressed_price_crop():
-    """The bug a replay caught: MELON's price crashes hard on a big sell
-    dump (its above-equilibrium shape is quadratic, data/README.md's Price
-    Function) and only recovers ~1 unit/day (no town shop demands MELON --
-    see data/README.md's Town Buildings table). Replanting MELON at its
-    full 45% target share while the price is still below what we'd sell it
-    for just re-floods a market we already flooded -- the planner should
-    route the seed budget to wheat/carrot instead while that holds."""
+    """MELON's price crashes hard on a big sell dump and recovers slowly.
+    Replanting it at full target share while price is still below sell
+    threshold just re-floods an already-flooded market -- the planner
+    should route the seed budget elsewhere while that holds."""
     farm = _farm({})
     private = {"seeds": {"MELON": 5, "WHEAT": 5, "CARROT": 5}}
     prices = {"MELON": 50, "WHEAT": 25, "CARROT": 35}  # melon well below 0.65 * base(250)
@@ -692,13 +653,11 @@ def test_crop_planner_avoids_depressed_price_crop():
 
 
 def test_crop_planner_price_attractiveness_can_override_target_share_gap():
-    """See the module docstring's Price-attractiveness-aware planting note:
-    a real replay showed STRAWBERRY at 2x+ its base price still losing to
-    MELON at roughly par, because _price_ok is a binary pass/fail -- once
-    both crops clear it, only the target-mix-share gap decided, and
-    MELON's dominant 45% share almost always has the bigger raw gap.
-    STRAWBERRY (5% share) at a genuinely great price should be able to
-    outrank MELON (45% share) merely at par."""
+    """_price_ok is a binary pass/fail -- once both crops clear it, a real
+    replay showed the target-mix-share gap deciding alone, so a
+    small-share crop at a genuinely great price still lost to a
+    dominant-share one merely at par. A high-priced STRAWBERRY should
+    outrank an at-par MELON despite MELON's much bigger target share."""
     farm = _farm({})
     private = {"seeds": {"MELON": 5, "STRAWBERRY": 5}}
     prices = {"MELON": 250, "STRAWBERRY": 240}  # melon at 1.0x its base (250),
@@ -834,15 +793,13 @@ def test_find_target_wheat_below_threshold_stays_held_outside_liquidation():
 
 
 def test_find_target_wheat_below_threshold_still_stays_held_during_liquidation():
-    """Same setup, but liquidating: deliberately UNCHANGED (see the module
-    docstring's Endgame liquidation (WHEAT) note) -- a first attempt added
-    `or liquidating` here too and it measurably regressed real money (15-seed
-    pool A/B 59.3%->49.6%, our own money down even in matchups where the win
-    count didn't move), because it dedicates a high-priority trip for nearly
-    every unit's small stray WHEAT during the final days, crowding out
-    higher-value harvesting/feeding. `_decide_unit`'s DROP gate still gets
-    the liquidating escape (see the test below) so it's dropped opportunistically
-    when a unit is at the shed for another reason -- just never a dedicated trip."""
+    """Same setup, but liquidating: deliberately UNCHANGED (an earlier
+    attempt added `or liquidating` here too and it regressed real money --
+    a dedicated high-priority trip for nearly every unit's small stray
+    WHEAT crowds out higher-value harvesting/feeding). `_decide_unit`'s
+    DROP gate still gets the liquidating escape, so it's dropped
+    opportunistically when a unit is at the shed anyway -- just never a
+    dedicated trip."""
     board_size = 5
     tiles = [[None for _ in range(board_size)] for _ in range(board_size)]
     tiles[0][1] = {"kind": "PASTURE", "animal": "COW", "fed_today": True, "cared_today": False}
@@ -1065,15 +1022,12 @@ def test_find_target_plant_priority_beats_weeding_under_the_gate():
 
 
 def test_find_target_animal_upkeep_ties_plant_priority_under_the_gate():
-    """15th market-order-slot-starvation attempt: before this fix, animal
-    upkeep (collect-fertilizer/care) sorted at a flat 3, so once seed
-    orders flow again (the 14th attempt) a fresh PLANT_PRIORITY_UNDER_GATE
-    (1.5) candidate would win outright regardless of distance, quietly
-    diverting crew-turns off animal husbandry -- the traced mechanism
-    behind the 14th attempt's MILK/WOOL/FERTILIZER price spillover (see
-    the module docstring). Flooring animal upkeep at plant_priority under
-    the gate ties them, so distance decides: a close animal-care tile
-    should now win over a farther empty tile."""
+    """Animal upkeep (collect-fertilizer/care) floors at
+    `min(3, plant_priority)`, so a fresh PLANT_PRIORITY_UNDER_GATE (1.5)
+    candidate ties instead of always outranking it once seed orders flow
+    freely again -- without this, a flat priority-3 upkeep tile quietly
+    lost crew-turns to husbandry. A close animal-care tile should win over
+    a farther empty tile once tied."""
     board_size = 5
     tiles = [[None for _ in range(board_size)] for _ in range(board_size)]
     tiles[0][0] = "LOCKED"  # the unit's own tile: not itself a competing plant candidate
