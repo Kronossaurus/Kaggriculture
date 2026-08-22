@@ -22,6 +22,7 @@ uv run scripts/run_local.py --p1 random --p2 random  # baseline vs baseline
 uv run scripts/run_local.py --seed 42                # deterministic episode
 uv run scripts/run_local.py --replay replays/last.json  # dump replay JSON for the visualizer
 uv run scripts/pool_winrate.py                          # main.py win rate vs a field of opponents, not just one
+uv run scripts/build_replay_viewer.py replays/episode-<id>-replay.json  # official Kaggriculture visualizer, offline HTML
 uv run python test_main.py                               # main.py regression tests (real bugs this session hit)
 uv run ruff check .                                      # lint suite
 
