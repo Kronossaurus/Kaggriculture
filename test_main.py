@@ -633,7 +633,7 @@ def test_crop_planner_excludes_crops_that_cannot_mature_in_time():
 def _resolve_target(
     pos, farm, day, board_size, inv, planner, animal_planner, shed_tiles,
     want_fertilizer, shed_wheat_available, liquidating, animal_zone,
-    quadrant_util=None, plant_priority=None,
+    quadrant_util=None, plant_priority=None, last_chance_window=False,
 ):
     """Test helper mirroring agent()'s post-on-tile routing for a single unit -- the
     personal (inventory-dependent) candidate from _find_personal_target and the shared
@@ -655,7 +655,7 @@ def _resolve_target(
         claimed.add((personal[0], personal[1]))
     jobs = main._build_tile_jobs(
         farm, day, board_size, claimed, animal_zone, quadrant_util, plant_priority,
-        liquidating, planner, animal_planner,
+        liquidating, planner, animal_planner, last_chance_window,
     )
     fx, fy = pos
     scored = [(x, y, prio, abs(x - fx) + abs(y - fy) + bias) for (x, y, prio, bias) in jobs]
@@ -780,6 +780,50 @@ def test_find_target_prioritizes_a_tile_about_to_become_a_weed():
         animal_zone=set(),
     )
     assert (target[0], target[1]) == (4, 4)  # the at-risk tile wins despite being much farther
+
+
+def test_find_target_at_risk_water_stays_priority_half_outside_last_chance_window():
+    """Third variant in [[harvest-early-at-risk-salvage-regression]]: outside
+    LAST_CHANCE_HOURS of day's end, an at-risk still-growing tile keeps the
+    existing priority 0.5 (proven to rescue 81% of these tiles already) --
+    escalating to the harvest tier only matters once the day is genuinely
+    running out, not for the rest of the day where there's still time."""
+    board_size = 5
+    tiles = [[None for _ in range(board_size)] for _ in range(board_size)]
+    at_risk = _tile(watered_today=False)  # WHEAT, age 0 < first_yield_day -- not harvestable
+    tiles[0][1] = at_risk
+    farm = {"tiles": tiles, "hands": []}
+    animal_planner = main._AnimalPlanner(farm, {}, {})
+    target = _resolve_target(
+        pos=[0, 0], farm=farm, day=0, board_size=board_size, inv={},
+        planner=main._CropPlanner({"seeds": {}}, farm, days_remaining=20),
+        animal_planner=animal_planner, shed_tiles=set(),
+        want_fertilizer=False, shed_wheat_available=False, liquidating=False,
+        animal_zone=set(), last_chance_window=False,
+    )
+    assert target[2] == 0.5
+
+
+def test_find_target_at_risk_water_escalates_to_harvest_tier_within_last_chance_window():
+    """Same tile, but within LAST_CHANCE_HOURS of day's end: now ties the
+    harvest tier (priority 0) instead of 0.5, giving a hand that isn't
+    already on the tile a real chance to still reach it before the day
+    ends and it's lost -- unlike the reverted last-turn-of-day variant,
+    there's still at least one turn of walking room left when this fires."""
+    board_size = 5
+    tiles = [[None for _ in range(board_size)] for _ in range(board_size)]
+    at_risk = _tile(watered_today=False)
+    tiles[0][1] = at_risk
+    farm = {"tiles": tiles, "hands": []}
+    animal_planner = main._AnimalPlanner(farm, {}, {})
+    target = _resolve_target(
+        pos=[0, 0], farm=farm, day=0, board_size=board_size, inv={},
+        planner=main._CropPlanner({"seeds": {}}, farm, days_remaining=20),
+        animal_planner=animal_planner, shed_tiles=set(),
+        want_fertilizer=False, shed_wheat_available=False, liquidating=False,
+        animal_zone=set(), last_chance_window=True,
+    )
+    assert target[2] == 0
 
 
 def test_find_target_prioritizes_an_at_risk_harvestable_tile_over_a_closer_one():

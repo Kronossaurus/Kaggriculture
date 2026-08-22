@@ -1541,6 +1541,13 @@ LAND_RESERVE_FLAT = 60  # lever 2 of 4, see _land_cash_reserve -- X594's own val
 SELL_PROCEEDS_DISCOUNT = 0.9  # lever 4 of 4, see _sell_proceeds -- X594's own value, not yet
                                # retuned for this agent's economy
 ENDGAME_LIQUIDATION_DAYS = 2  # ignore the sell-price threshold this close to the end
+LAST_CHANCE_HOURS = 4  # see [[harvest-early-at-risk-salvage-regression]]'s last-turn-of-day
+                        # variant: hour == turns_per_day - 1 left zero turns for a hand not
+                        # already standing on the tile to walk over, so it could only ever have
+                        # been a no-op regardless of crew capacity -- this widens the window to
+                        # give a hand within ~this many tiles (our own pasture cluster's own
+                        # measured max distance from spawn was ~4.12, see the same memory) an
+                        # actual chance to reach it before end of day
 
 
 def _cfg_get(config, key, default):
@@ -1991,7 +1998,10 @@ def _find_personal_target(
     return candidates[0]
 
 
-def _build_tile_jobs(farm, day, board_size, claimed, animal_zone, quadrant_util, plant_priority, liquidating, planner, animal_planner):
+def _build_tile_jobs(
+    farm, day, board_size, claimed, animal_zone, quadrant_util, plant_priority, liquidating,
+    planner, animal_planner, last_chance_window=False,
+):
     """The unit-independent subset of this agent's old single-scan target search --
     harvest/water/weed/animal-upkeep/plant/build -- any unit could do any of these
     regardless of what it's carrying, so they're built once per turn here instead of every
@@ -2026,7 +2036,21 @@ def _build_tile_jobs(farm, day, board_size, claimed, animal_zone, quadrant_util,
                     jobs.append((x, y, 0, -HARVEST_AT_RISK_DIST_BIAS if at_risk else 0))  # harvest
                 elif not tile["watered_today"]:
                     at_risk = not liquidating and tile.get("consecutive_unwatered", 0) >= 1
-                    jobs.append((x, y, 0.5 if at_risk else water_priority, 0))  # water
+                    # Third variant after [[harvest-early-at-risk-salvage-regression]]: forcing
+                    # an early HARVEST regressed (forfeits the 81% that self-recover anyway);
+                    # tying the harvest tier (0) all day partially regressed (steals crew from
+                    # genuinely-ripe, merely-closer harvests all day for a risk that isn't
+                    # urgent yet most of the day); tying it only on the literal last turn was a
+                    # total no-op (a hand not already standing on the tile has zero turns left
+                    # to walk over, so it could never help regardless of crew capacity -- see
+                    # that memory for why this isn't evidence of a real reachability ceiling by
+                    # itself). This narrows the window to LAST_CHANCE_HOURS before day's end
+                    # instead of either the whole day or none of it -- long enough for a
+                    # reasonably-close hand to actually walk over, short enough to limit how
+                    # much it competes with real harvests to only when the risk is genuinely
+                    # close to unrecoverable.
+                    urgent = at_risk and last_chance_window
+                    jobs.append((x, y, 0 if urgent else (0.5 if at_risk else water_priority), 0))  # water
             elif _is_weed(tile):
                 jobs.append((x, y, 2, 0))  # clear a weed to reclaim the tile
             elif _is_animal_tile(tile):
@@ -2740,6 +2764,7 @@ def agent(obs, config=None):
     farm = farms[player]
     private = obs.get("private", {}) or {}
     day = obs.get("day", 0)
+    hour = obs.get("hour", 0)
     board_size = len(farm["tiles"])
     shed_tiles = _shed_adjacent_tiles(board_size)
 
@@ -2748,6 +2773,7 @@ def agent(obs, config=None):
     last_day = max(0, -(-episode_steps // turns_per_day) - 1)  # ceil(steps/turns_per_day) - 1
     days_remaining = last_day - day
     liquidating = days_remaining <= ENDGAME_LIQUIDATION_DAYS
+    last_chance_window = hour >= turns_per_day - LAST_CHANCE_HOURS
 
     market_obs = obs.get("market", {}) or {}
     market_prices = market_obs.get("prices", {})
@@ -2819,7 +2845,7 @@ def agent(obs, config=None):
                 claimed.add((p[0], p[1]))
         jobs = _build_tile_jobs(
             farm, day, board_size, claimed, animal_zone, quadrant_util, plant_priority,
-            liquidating, planner, animal_planner,
+            liquidating, planner, animal_planner, last_chance_window,
         )
         assignment = _assign_tile_jobs(pending, jobs, personal) if (jobs or personal) else {}
         for i, pos in pending:
