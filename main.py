@@ -1286,6 +1286,28 @@ SAFETY_RESERVE 147->561, FERTILIZER_MAX_PRICE_FRAC 1.147->1.92, SHED_OVERFLOW_GU
 longer between sales now, so a much bigger buffer is needed before optional buys) and the
 WHEAT sell threshold nearly doubled (holding out for a better price is worth more per unit
 now that a harvest itself is worth 4-6x more). 56/56 tests pass, lint clean.
+
+**BUY-side follow-up: a data/README.md audit for other overlooked rules, prompted by the
+harvest-timing bug's own root cause, found the mirror-image gap on the buy side.** "The buy
+price is quoted at the post-buy inventory" (data/README.md) -- confirmed directly against
+kaggriculture.py's `_commit_unit`: BUY_PRODUCT decrements `market["inventory"]`
+unconditionally (no floor/cap exception the way SELL's $1 floor has), so each unit bought
+within the same order pushes the next one's price further from the last, exactly mirroring
+the SELL-side gap lever 4 already fixed. `_orders_cash_cost`'s BUY_PRODUCT branch was still
+using the old flat `qty * current_price` estimate. Measured on a realistic 26-unit
+consolidated WHEAT feed order (`_build_feed_orders`'s own shape, one order per turn since the
+18th attempt): 13% underestimate ($650 flat vs. $735 real) with the market near I0 --
+counterintuitively *worse* near equilibrium than when already deep in shortage, where the
+below-I0 shape functions (sqrt for WHEAT) have mostly flattened out. That underestimate feeds
+`cash_reserved`, which gates every later builder's own affordability check the same turn.
+
+Added `_buy_cost` (mirrors `_sell_proceeds`, no discount -- this is a cost estimate, and the
+precise walk itself already removes the systematic underestimate, no separate haircut
+needed) and switched `_orders_cash_cost`'s BUY_PRODUCT branch to it; `prices` was then dead
+in `_orders_cash_cost` (every remaining order type prices off a fixed cost, not the market)
+and removed from its signature and all 7 call sites. 57/57 tests pass, lint clean. Not yet
+re-validated at the pool/30-seed level -- do that before treating this as more than
+mechanically correct.
 """
 
 from __future__ import annotations
@@ -2326,7 +2348,29 @@ def _sell_proceeds(item, qty, inventory):
     return total
 
 
-def _orders_cash_cost(orders, farm, prices, market_inventory):
+def _buy_cost(item, qty, inventory):
+    """Mirror of _sell_proceeds for the buy side -- found independently while auditing
+    data/README.md for other overlooked rules after the harvest-timing fix (see the module
+    docstring's Harvest-timing note's BUY-side follow-up), not adapted from the X578/X594
+    reference. data/README.md: "the buy price is quoted at the post-buy inventory" --
+    kaggriculture.py's `_commit_unit` confirms BUY_PRODUCT decrements `market["inventory"]`
+    unconditionally (no floor/cap exception the way SELL's $1 floor has), so each unit bought
+    within the same order pushes the next one's price further from the last. A flat
+    `qty * current_price` estimate underestimates a large order's true cost -- measured at 13%
+    on a realistic 26-unit consolidated WHEAT feed order (`_build_feed_orders`) with the
+    market near I0, where the below-I0 shape functions (sqrt/log/etc.) have their steepest
+    marginal slope -- counterintuitively worse near equilibrium than when the market is
+    already deep in shortage, where the same curves have mostly flattened out."""
+    inv = inventory
+    total = 0
+    for _ in range(qty):
+        price = market_price(item, inv)
+        total += price
+        inv -= 1
+    return total
+
+
+def _orders_cash_cost(orders, farm, market_inventory):
     """16th market-order-slot-starvation attempt: estimate the total cash
     a list of market orders will draw from farm["money"] this turn, using
     this turn's opening prices/counts -- the same approximation each
@@ -2368,7 +2412,8 @@ def _orders_cash_cost(orders, farm, prices, market_inventory):
     `qty * current_price` SELL estimate with a per-unit price-impact walk, discounted by
     `SELL_PROCEEDS_DISCOUNT` -- a large SELL order was otherwise overestimating its own
     proceeds, since one flat price ignores that each unit sold pushes the next one's price
-    down."""
+    down. The same `market_inventory` also drives `_buy_cost` for BUY_PRODUCT -- see its own
+    docstring for the mirrored underestimate on the buy side, found in the same audit."""
     total = 0.0
     n_extra = len(farm["unlocked_quadrants"]) - 1
     hires_so_far = farm["hires_today"]
@@ -2382,8 +2427,8 @@ def _orders_cash_cost(orders, farm, prices, market_inventory):
         elif op == "BUY_PRODUCT":
             item = order[1]
             qty = order[2] if len(order) > 2 else 1
-            base = MARKET_PARAMS[item]["base"]
-            total += qty * prices.get(item, base)
+            inv = market_inventory.get(item, MARKET_I0)
+            total += _buy_cost(item, qty, inv)
         elif op == "BUY_SEED":
             item = order[1]
             qty = order[2] if len(order) > 2 else 1
@@ -2798,7 +2843,7 @@ def agent(obs, config=None):
     market = []
     sell_orders = _build_sell_orders(shed, market_prices, days_remaining, farm)
     market += sell_orders
-    cash_reserved = _orders_cash_cost(sell_orders, farm, market_prices, market_inventory)  # negative: SELL earns
+    cash_reserved = _orders_cash_cost(sell_orders, farm, market_inventory)  # negative: SELL earns
 
     # Lever 3 of 4 (see the module docstring's Harvest-timing note's land-purchase-delay
     # follow-up): hire now runs before land, mirroring the X578/X594 kernel-pull reference's
@@ -2808,25 +2853,25 @@ def agent(obs, config=None):
     # worse, not better. Hire claims its own real cost first now; land only sees what's left.
     hire_orders = _build_hire_orders(farm)
     market += hire_orders
-    cash_reserved += _orders_cash_cost(hire_orders, farm, market_prices, market_inventory)
+    cash_reserved += _orders_cash_cost(hire_orders, farm, market_inventory)
 
     land_orders = _build_land_orders(farm, days_remaining, farm["money"] - cash_reserved)
     market += land_orders
-    cash_reserved += _orders_cash_cost(land_orders, farm, market_prices, market_inventory)
+    cash_reserved += _orders_cash_cost(land_orders, farm, market_inventory)
 
     feed_orders = _build_feed_orders(farm, private, market_prices, farm["money"] - cash_reserved)
     market += feed_orders
-    cash_reserved += _orders_cash_cost(feed_orders, farm, market_prices, market_inventory)
+    cash_reserved += _orders_cash_cost(feed_orders, farm, market_inventory)
 
     seed_orders = _build_seed_orders(seeds, farm["money"] - cash_reserved, days_remaining, market_prices)
     market += seed_orders
-    cash_reserved += _orders_cash_cost(seed_orders, farm, market_prices, market_inventory)
+    cash_reserved += _orders_cash_cost(seed_orders, farm, market_inventory)
 
     fertilizer_orders = _build_fertilizer_orders(
         private, market_prices, farm["money"] - cash_reserved, want_fertilizer
     )
     market += fertilizer_orders
-    cash_reserved += _orders_cash_cost(fertilizer_orders, farm, market_prices, market_inventory)
+    cash_reserved += _orders_cash_cost(fertilizer_orders, farm, market_inventory)
 
     market += _build_animal_orders(farm, private, farm["money"] - cash_reserved)
     market = market[:MAX_MARKET_ORDERS]

@@ -392,7 +392,6 @@ def test_orders_cash_cost_sums_across_order_types():
     already committed -- see the module docstring's Same-turn cash
     competition note."""
     farm = {"unlocked_quadrants": ["NW", "NE"], "hires_today": 1}
-    prices = {"WHEAT": 30}
     orders = [
         ["BUY_PRODUCT", "WHEAT", 2],
         ["BUY_SEED", "MELON", 1],
@@ -400,9 +399,10 @@ def test_orders_cash_cost_sums_across_order_types():
         ["BUY_LAND"],
         ["HIRE"],
     ]
-    cost = main._orders_cash_cost(orders, farm, prices, market_inventory={})
+    cost = main._orders_cash_cost(orders, farm, market_inventory={})
     expected = (
-        2 * 30                                            # BUY_PRODUCT WHEAT x2 @ 30
+        main._buy_cost("WHEAT", 2, main.MARKET_I0)         # BUY_PRODUCT WHEAT x2, market_inventory
+                                                             # missing "WHEAT" -> falls back to MARKET_I0
         + main.CROPS["MELON"]["seed"]                      # BUY_SEED MELON
         + main.ANIMALS["COW"]["cost"]                       # BUY_ANIMAL COW
         + main.LAND_PRICES[len(farm["unlocked_quadrants"]) - 1]  # BUY_LAND, n_extra=1
@@ -423,12 +423,25 @@ def test_orders_cash_cost_sell_orders_are_negative_revenue():
     so 4 units at WHEAT's own base price (inventory exactly at I0) nets
     slightly under 4 * 25 = 100 before SELL_PROCEEDS_DISCOUNT (0.9) too."""
     farm = {"unlocked_quadrants": ["NW"], "hires_today": 0}
-    prices = {"WHEAT": 25}
     orders = [["SELL", "WHEAT", 4]]
     inventory = {"WHEAT": main.MARKET_I0}
-    cost = main._orders_cash_cost(orders, farm, prices, market_inventory=inventory)
+    cost = main._orders_cash_cost(orders, farm, market_inventory=inventory)
     assert cost == -(main._sell_proceeds("WHEAT", 4, main.MARKET_I0) * main.SELL_PROCEEDS_DISCOUNT)
     assert cost == -87.3  # locks the actual number so a future formula change is visible here too
+
+
+def test_orders_cash_cost_buy_product_uses_per_unit_price_walk():
+    """Mirror of the SELL test above, for the buy side (see _buy_cost's own docstring): a
+    flat qty * current_price estimate underestimates a large BUY_PRODUCT order's true cost,
+    since each unit bought pushes the next one's price up (post-buy inventory, per
+    data/README.md) -- found independently auditing data/README.md for other overlooked
+    rules after the harvest-timing fix, not part of the original 4 X578/X594 levers."""
+    farm = {"unlocked_quadrants": ["NW"], "hires_today": 0}
+    orders = [["BUY_PRODUCT", "WHEAT", 4]]
+    inventory = {"WHEAT": main.MARKET_I0}
+    cost = main._orders_cash_cost(orders, farm, market_inventory=inventory)
+    assert cost == main._buy_cost("WHEAT", 4, main.MARKET_I0)
+    assert cost > 4 * main.market_price("WHEAT", main.MARKET_I0)  # strictly above the flat estimate
 
 
 def test_sell_proceeds_price_declines_across_units_in_one_order():
