@@ -927,7 +927,7 @@ def test_find_target_water_normal_priority_once_past_yield_inert_window():
         want_fertilizer=False, shed_wheat_available=False, liquidating=False,
         animal_zone=set(),
     )
-    assert target[2] == 1  # water_priority (not liquidating)
+    assert target[2] == main.WATER_ROUTINE_PRIORITY  # water_priority (not liquidating)
 
 
 def test_find_target_safe_harvestable_tile_uses_harvest_safe_priority():

@@ -112,6 +112,15 @@ PARAM_SPACE = {
     # hand-picked 10/10 by a wide margin (up to 0.82 vs ~0.5-0.6 win rate on the search pool)
     "CROP_MIX_RAMP_DURATION": ("int", 2, 10),  # main.py: 10
     "STRAWBERRY_RESERVE_LATE": ("int", 3, 8),  # main.py: 6
+    # Added 2026-08-22: a top-ladder replay comparison found this agent's real end-of-day
+    # watering coverage averaging 71.1% (days 10-27) vs a top player's 86.1% -- a real ~15pp
+    # gap, unlike DIG rate or MOVE fraction (both comparable). Three targeted fixes elsewhere
+    # (crew size, fertilizer batching/delivery gating) all failed to move it -- testing whether
+    # routine watering's own priority is simply not urgent enough relative to what it competes
+    # against (animal upkeep, weed-clearing, routine planting). Range extends below 0 (more
+    # urgent than any at-risk-harvest/at-risk-water tier) and up to 3 (roughly WATER_YIELD_
+    # INERT_PRIORITY's own range) to let the search find either direction.
+    "WATER_ROUTINE_PRIORITY": ("float", -0.5, 3.0),  # main.py: 1
 }
 
 # WHEAT_SELL_THRESHOLD isn't a top-level `NAME = value` constant -- it's

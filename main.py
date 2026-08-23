@@ -370,23 +370,37 @@ HARVEST_AT_RISK_DIST_BIAS = 1000  # subtracted from a harvestable tile's sort_di
     # large enough to strictly dominate any real on-board distance, so an about-to-expire ripe
     # tile is always served before a merely-closer one still within priority 0. See the module
     # docstring's Harvest-ready tiles rotting to weeds note.
-HARVEST_SAFE_PRIORITY = 1.657  # MC-searched (scripts/mc_search.py) -- a NOT-at-risk harvestable
+HARVEST_SAFE_PRIORITY = 1.206  # MC-searched (scripts/mc_search.py) -- a NOT-at-risk harvestable
     # tile's priority (at-risk stays 0, unchanged). Deliberately kept > 0.5 (at-risk water's own
     # priority) by construction here so the two never tie -- see
     # [[harvest-safe-deprioritization-tradeoff]] for why an exact tie (the first, hand-picked
     # attempt) regressed by turning a decisive ordering into an ambiguous distance-only
-    # contention. Found together with WATER_YIELD_INERT_PRIORITY and HANDS_TARGET_Q1 above in a
-    # focused 40-trial search using both reactive sentinels as the search pool directly (not the
-    # usual x492+fertilizer_selling default -- see mc_search.py's DEFAULT_SEARCH_POOL): this
-    # combination scored 0.62 win rate there vs. baseline's 0.50, and confirmed at the full
-    # 30-seed default-pool protocol: 47.8%->52.8% overall, with BOTH reactive sentinels
-    # improving (main_price_reactive_seed_reserve 26.7%->30.0%, main_harvest_timing
-    # 53.3%->66.7%) -- unlike either single hand-picked attempt, no trade-off between them.
-WATER_YIELD_INERT_PRIORITY = 2.971  # MC-searched alongside HARVEST_SAFE_PRIORITY above --
+    # contention. Re-searched 2026-08-22 jointly with WATER_YIELD_INERT_PRIORITY and
+    # WATER_ROUTINE_PRIORITY below (see that constant's own comment for what motivated adding
+    # it) using the two reactive sentinels + main_mc_tuned_priority as the search pool: this
+    # combination scored 0.93 there, and confirmed at the full 30-seed default-pool protocol:
+    # 71.2%->77.1% overall, every opponent improving or tying, none regressing
+    # (main_plant_priority +16.6pp, main_price_reactive_seed_reserve +13.4pp,
+    # main_mc_tuned_priority +10.0pp) -- also cut mean weed% on a 20-replay sample 6.8%->4.4%,
+    # the actual metric this round of tuning was chasing, not just win rate.
+WATER_YIELD_INERT_PRIORITY = 1.387  # MC-searched alongside HARVEST_SAFE_PRIORITY above --
     # priority for a not-yet-at-risk tile whose watering wouldn't add any yield_units yet
     # (_is_yield_inert). See [[water-yield-inert-deprioritization-tradeoff]] for the first,
     # hand-picked attempt at this (value 3 -- barely different in magnitude, but paired with an
     # exactly-tied HARVEST_SAFE_PRIORITY there instead of a properly searched one).
+WATER_ROUTINE_PRIORITY = 2.294  # added 2026-08-22: routine (not-yet-at-risk) watering's own
+    # priority in _build_tile_jobs (liquidating still forces a flat 5, unrelated). A top-ladder
+    # replay comparison found this agent's real end-of-day watering coverage averaging 71.1%
+    # (days 10-27) vs a top player's 86.1% -- a real ~15pp gap, unlike DIG rate or MOVE fraction
+    # (both comparable) -- while three targeted fixes elsewhere (more crew, fertilizer batching/
+    # delivery gating, see [[hands-per-animal-fibonacci-cost-trap]]/
+    # [[fertilizer-delivery-gate-inert]]) all failed to move it. Two single-variable MC searches
+    # found negative values catastrophic (win rate collapses to ~0.27-0.42 regardless of the
+    # other two priorities above -- a hard floor, not tuning noise) and the landscape above 0
+    # non-monotonic (hand-picked 1.5/2.6 each showed real trade-offs against one reactive
+    # sentinel or the other at the full-pool level). A joint search alongside HARVEST_SAFE_
+    # PRIORITY/WATER_YIELD_INERT_PRIORITY found this combination with no such trade-off -- see
+    # HARVEST_SAFE_PRIORITY's own comment for the validated result.
 WHEAT_SHED_RETURN_THRESHOLD = 5  # minimum carried WHEAT before it's worth a dedicated trip to
     # the shed (_find_personal_target) or before it's eligible to DROP once already there
     # (_decide_unit) -- 12th market-order-slot-starvation attempt. Must exceed the 4-unit cap
@@ -1114,7 +1128,7 @@ def _build_tile_jobs(
     position), preserving every existing sort_dist adjustment exactly --
     `HARVEST_AT_RISK_DIST_BIAS` and the quadrant-balance nudge for fresh plantings -- since
     neither of those depends on which unit is asking, just tile state."""
-    water_priority = 5 if liquidating else 1
+    water_priority = 5 if liquidating else WATER_ROUTINE_PRIORITY
     # 15th market-order-slot-starvation attempt: see the module docstring for why animal
     # upkeep floors at plant_priority instead of a flat 3 -- unchanged by this refactor.
     animal_upkeep_priority = min(3, plant_priority)
