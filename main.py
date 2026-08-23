@@ -865,6 +865,26 @@ def _strawberry_seed_reserve(day):
     return base + frac * (STRAWBERRY_RESERVE_LATE - base)
 
 
+def _above_sell_threshold(prices, resource):
+    """Is `resource`'s current market price at or above its own SELL_PARAMS threshold (True,
+    never gates, if there's no price data at all)? Shared by _CropPlanner._price_ok (resource is
+    the crop itself) and _AnimalPlanner._price_ok (resource is the kind's own ANIMAL_PRODUCT) --
+    both used to carry an identical copy of this formula, one lookup apart."""
+    price = prices.get(resource)
+    if price is None:
+        return True
+    base = MARKET_PARAMS[resource]["base"]
+    return price >= base * SELL_PARAMS[resource]["threshold"]
+
+
+def _price_gated_pool(candidates, price_ok):
+    """Prefer only currently-worth-selling candidates, but never leave the pool empty (falls back
+    to every candidate if all of them are currently priced below their own threshold -- see
+    _above_sell_threshold) -- the exact fallback shape shared by _CropPlanner.choose() and
+    _AnimalPlanner's choose_structure()/choose_pickup()."""
+    return [c for c in candidates if price_ok(c)] or candidates
+
+
 class _CropPlanner:
     """Tracks, for one turn, which crop each new PLANT should use.
 
@@ -895,15 +915,10 @@ class _CropPlanner:
         return any(self.seed_budget.get(c, 0) > 0 for c in self.plantable_crops)
 
     def _price_ok(self, crop):
-        """Would we currently be willing to *sell* this crop? If not (and we
-        have price data at all), planting more of it just grows tomorrow's
-        shed pile in a market that's already below what we're willing to
-        accept -- see the module docstring's Price-aware planting note."""
-        price = self.prices.get(crop)
-        if price is None:
-            return True
-        base = MARKET_PARAMS[crop]["base"]
-        return price >= base * SELL_PARAMS[crop]["threshold"]
+        """Would we currently be willing to *sell* this crop? If not, planting more of it just
+        grows tomorrow's shed pile in a market that's already below what we're willing to accept
+        -- see the module docstring's Price-aware planting note, and _above_sell_threshold."""
+        return _above_sell_threshold(self.prices, crop)
 
     def _score(self, crop):
         """Lower (more negative) wins the min() in choose(): how far below
@@ -931,7 +946,7 @@ class _CropPlanner:
         available = [c for c in self.plantable_crops if self.seed_budget.get(c, 0) > 0]
         if not available:
             return None
-        pool = [c for c in available if self._price_ok(c)] or available
+        pool = _price_gated_pool(available, self._price_ok)
         crop = min(pool, key=self._score)
         self.seed_budget[crop] -= 1
         self.counts[crop] += 1
@@ -1026,12 +1041,7 @@ class _AnimalPlanner:
         return max(0, self.target - self._committed())
 
     def _price_ok(self, kind):
-        product = ANIMAL_PRODUCT[kind]
-        price = self.prices.get(product)
-        if price is None:
-            return True
-        base = MARKET_PARAMS[product]["base"]
-        return price >= base * SELL_PARAMS[product]["threshold"]
+        return _above_sell_threshold(self.prices, ANIMAL_PRODUCT[kind])
 
     def wants_structure(self):
         if self._committed() >= self.target:
@@ -1067,7 +1077,7 @@ class _AnimalPlanner:
         ]
         if not needing:
             return None
-        pool = [k for k in needing if self._price_ok(k)] or needing
+        pool = _price_gated_pool(needing, self._price_ok)
         kind = min(pool, key=lambda k: self.counts[k] / self.total - ANIMAL_TARGET_SHARE[k])
         self.empty_structures[ANIMAL_STRUCTURE[kind]] += 1  # reserve so two units don't both build one
         return kind
@@ -1084,7 +1094,7 @@ class _AnimalPlanner:
         ]
         if not ready:
             return None
-        pool = [k for k in ready if self._price_ok(k)] or ready
+        pool = _price_gated_pool(ready, self._price_ok)
         kind = min(pool, key=lambda k: self.counts[k] / self.total - ANIMAL_TARGET_SHARE[k])
         self.empty_structures[ANIMAL_STRUCTURE[kind]] -= 1  # reserve so two units don't grab the same slot
         self.shed[kind] = self.shed.get(kind, 0) - 1
