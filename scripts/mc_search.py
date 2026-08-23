@@ -131,18 +131,29 @@ PARAM_SPACE = {
     # logic only needs relative gaps, doesn't strictly require it).
     "ANIMAL_TARGET_SHARE_COW": ("float", 0.35, 0.85),  # main.py: 0.60
     "ANIMAL_TARGET_SHARE_SHEEP": ("float", 0.15, 0.65),  # main.py: 0.40
+    # Added 2026-08-23, user-requested follow-up to SHEEP_MAX: 5 downloaded top-ladder replays
+    # cross-referencing own SHEEP count, opponent SHEEP count, and WOOL shed stockpile against
+    # WOOL price found count (own or combined) does NOT predict a price crash -- a game with only
+    # 5-7 combined SHEEP crashed as hard as one with 29. What differed: the top player with the
+    # healthiest/most stable WOOL price (Ryo, #1 ladder) held WOOL shed stock at 0 the entire
+    # game -- sold every turn regardless of price -- while the two worst games showed WOOL
+    # stockpiling to 16-24 units precisely while price stayed pinned near $1. Our own
+    # SELL_PARAMS["WOOL"]["threshold"]=0.60 makes this agent do the opposite of the pattern that
+    # correlated with recovery (hold out for a better price instead of dumping). Range extends
+    # well below the current value to test that hypothesis, and up to it to let the search find
+    # the null result too.
+    "WOOL_SELL_THRESHOLD": ("float", 0.10, 0.65),  # main.py: 0.60
 }
 
-# WHEAT_SELL_THRESHOLD isn't a top-level `NAME = value` constant -- it's
-# nested in SELL_PARAMS["WHEAT"]["threshold"]. Patched with its own regex
-# instead of forcing every constant through the generic top-level pattern.
-_CUSTOM_PATCH_PATTERNS = {
-    "WHEAT_SELL_THRESHOLD": re.compile(r'("WHEAT":\s*\{"threshold":\s*)[^}]+(\})'),
-    # Anchored to the ANIMAL_TARGET_SHARE literal specifically (not just any dict with a "COW"/
-    # "SHEEP" key -- ANIMAL_PRODUCT/ANIMAL_STRUCTURE also have those keys, mapped to strings).
-    "ANIMAL_TARGET_SHARE_COW": re.compile(r'(ANIMAL_TARGET_SHARE = \{"COW":\s*)[^,}]+(,)'),
-    "ANIMAL_TARGET_SHARE_SHEEP": re.compile(r'(ANIMAL_TARGET_SHARE = \{"COW":[^,]+, "SHEEP":\s*)[^,}]+(,)'),
-}
+# Was needed for WHEAT_SELL_THRESHOLD/WOOL_SELL_THRESHOLD/ANIMAL_TARGET_SHARE_COW/_SHEEP, which
+# used to live nested inside dict literals (SELL_PARAMS["WHEAT"]["threshold"], etc.) with no
+# top-level `NAME = value` line the generic pattern below could match. main.py's 2026-08-23
+# constants simplification (user-requested, "para facilitar futuros mc") promoted every one of
+# those to a real top-level constant that the dict is now assembled *from* -- see main.py's
+# CROP_TARGET_SHARE comment for the full rationale. Nothing needs a custom pattern any more, but
+# the mechanism stays available (empty) in case some future constant genuinely can't be promoted
+# the same way.
+_CUSTOM_PATCH_PATTERNS: dict[str, re.Pattern] = {}
 
 
 def sample_params(rng: random.Random, active: dict) -> dict[str, float | int]:

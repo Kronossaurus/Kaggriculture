@@ -310,7 +310,20 @@ from kaggle_environments.envs.kaggriculture.kaggriculture import (
 # ---------------------------------------------------------------------------
 
 CASH_CROPS = ("MELON", "WHEAT", "CARROT", "TOMATO", "STRAWBERRY")
-CROP_TARGET_SHARE = {"MELON": 0.45, "WHEAT": 0.25, "CARROT": 0.15, "TOMATO": 0.10, "STRAWBERRY": 0.05}
+# Each crop's baseline share is its own top-level constant (2026-08-23 simplification, user-
+# requested "para facilitar futuros mc" -- every previously dict-nested tunable in this module
+# is now a plain top-level NAME = value, so scripts/mc_search.py's generic top-level patch regex
+# can target it directly without a bespoke _CUSTOM_PATCH_PATTERNS entry). Pure refactor, no
+# behavior change -- CROP_TARGET_SHARE below is assembled from these, same values as before.
+MELON_TARGET_SHARE = 0.45
+WHEAT_TARGET_SHARE = 0.25
+CARROT_TARGET_SHARE = 0.15
+TOMATO_TARGET_SHARE = 0.10
+STRAWBERRY_TARGET_SHARE = 0.05
+CROP_TARGET_SHARE = {
+    "MELON": MELON_TARGET_SHARE, "WHEAT": WHEAT_TARGET_SHARE, "CARROT": CARROT_TARGET_SHARE,
+    "TOMATO": TOMATO_TARGET_SHARE, "STRAWBERRY": STRAWBERRY_TARGET_SHARE,
+}
 # [[strawberry-shift-throughput-gap]]: two straight attempts to shift this flat, season-long dict
 # toward real-ladder players' ~64% STRAWBERRY share regressed hard (47.8%->25.6% on the second,
 # post-throughput-fix attempt) via a capital-allocation/cash-flow-timing mechanism a *flat* share
@@ -409,8 +422,15 @@ WHEAT_SHED_RETURN_THRESHOLD = 5  # minimum carried WHEAT before it's worth a ded
     # -- see _decide_unit's carried_produce comment for the full story (this was the actual
     # bug behind the 11th/12th attempts' weed-count explosion, not a trip-generation issue)
 
-SEED_RESERVE = {"MELON": 3, "WHEAT": 3, "CARROT": 3, "TOMATO": 2, "STRAWBERRY": 2}  # baseline,
-    # used as-is while a crop's price isn't currently attractive -- see the module
+MELON_SEED_RESERVE = 3
+WHEAT_SEED_RESERVE = 3
+CARROT_SEED_RESERVE = 3
+TOMATO_SEED_RESERVE = 2
+STRAWBERRY_SEED_RESERVE = 2
+SEED_RESERVE = {
+    "MELON": MELON_SEED_RESERVE, "WHEAT": WHEAT_SEED_RESERVE, "CARROT": CARROT_SEED_RESERVE,
+    "TOMATO": TOMATO_SEED_RESERVE, "STRAWBERRY": STRAWBERRY_SEED_RESERVE,
+}  # baseline, used as-is while a crop's price isn't currently attractive -- see the module
     # docstring's Seed reserve note
 SEED_RESERVE_PRICE_CAP = 2.0  # max multiplier on SEED_RESERVE when a crop's current price is
     # attractively above its own base -- see _build_seed_orders. Doubling SEED_RESERVE flatly
@@ -441,29 +461,38 @@ FERTILIZER_MAX_PRICE_FRAC = 1.92  # don't buy fertilizer more than ~92% over bas
                                    # reactive sentinels again (1W->2W, 3W->8W), regresses
                                    # nowhere -- see that note for the full result table.
 
+# threshold: fraction of base price required to sell at all -- see _build_sell_orders for why
+# there's no per-turn cap. Shared by _CropPlanner and _AnimalPlanner's own _price_ok, so a
+# crop/animal kind's plant/build eligibility always matches its sell eligibility. Each one is its
+# own top-level constant (see CROP_TARGET_SHARE's comment above for why) so SELL_PARAMS below is
+# just an assembled lookup, not the source of truth.
+MELON_SELL_THRESHOLD = 0.65
+WHEAT_SELL_THRESHOLD = 0.854  # was 0.45 -- see the module docstring's Harvest-timing note's
+    # MC-search-tuning follow-up. A much higher bar to sell at all now that a WHEAT harvest is
+    # worth 4-6x more per tile (deferred to max_yield_day): holding out for a better price is
+    # worth more per unit than it used to be.
+CARROT_SELL_THRESHOLD = 0.45
+TOMATO_SELL_THRESHOLD = 0.50
+STRAWBERRY_SELL_THRESHOLD = 0.55
+MILK_SELL_THRESHOLD = 0.50
+WOOL_SELL_THRESHOLD = 0.60  # WOOL's above-equilibrium price shape is nearly as steep as MELON's,
+    # see the Price-aware planting note. Tested lower (down to 0.35, chasing a top-ladder-replay
+    # pattern where the healthiest-price player never stockpiled WOOL) -- inert at the full-pool
+    # 30-seed protocol (77.4%->77.0%, within noise); see [[wool-sell-threshold-inert]]. Left at
+    # 0.60, kept as an MC-search knob (scripts/mc_search.py) for future re-tuning.
+EGG_SELL_THRESHOLD = 0.35
+FERTILIZER_SELL_THRESHOLD = 0.50  # collected free from animal structures (COLLECT_FERTILIZER) in
+    # excess of what crops currently need -- see the module docstring's Selling fertilizer note
 SELL_PARAMS = {
-    # threshold: fraction of base price required to sell at all -- see
-    # _build_sell_orders for why there's no per-turn cap. Shared by
-    # _CropPlanner and _AnimalPlanner's own _price_ok, so a crop/animal
-    # kind's plant/build eligibility always matches its sell eligibility.
-    "MELON":      {"threshold": 0.65},
-    "WHEAT":      {"threshold": 0.854},  # was 0.45 -- see the module docstring's Harvest-
-                                          # timing note's MC-search-tuning follow-up. A much
-                                          # higher bar to sell at all now that a WHEAT
-                                          # harvest is worth 4-6x more per tile (deferred to
-                                          # max_yield_day): holding out for a better price is
-                                          # worth more per unit than it used to be.
-    "CARROT":     {"threshold": 0.45},
-    "TOMATO":     {"threshold": 0.50},
-    "STRAWBERRY": {"threshold": 0.55},
-    "MILK":       {"threshold": 0.50},
-    "WOOL":       {"threshold": 0.60},  # WOOL's above-equilibrium price shape is nearly
-                                         # as steep as MELON's, see the Price-aware
-                                         # planting note
-    "EGG":        {"threshold": 0.35},
-    "FERTILIZER": {"threshold": 0.50},  # collected free from animal structures (COLLECT_FERTILIZER)
-                                         # in excess of what crops currently need -- see the module
-                                         # docstring's Selling fertilizer note
+    "MELON": {"threshold": MELON_SELL_THRESHOLD},
+    "WHEAT": {"threshold": WHEAT_SELL_THRESHOLD},
+    "CARROT": {"threshold": CARROT_SELL_THRESHOLD},
+    "TOMATO": {"threshold": TOMATO_SELL_THRESHOLD},
+    "STRAWBERRY": {"threshold": STRAWBERRY_SELL_THRESHOLD},
+    "MILK": {"threshold": MILK_SELL_THRESHOLD},
+    "WOOL": {"threshold": WOOL_SELL_THRESHOLD},
+    "EGG": {"threshold": EGG_SELL_THRESHOLD},
+    "FERTILIZER": {"threshold": FERTILIZER_SELL_THRESHOLD},
 }
 
 SHED_CAPACITY = 100  # data/README.md default; not exposed in `obs`
@@ -475,18 +504,25 @@ ANIMAL_KINDS = ("COW", "SHEEP", "GOOSE")
 ANIMAL_PRODUCT = {"COW": "MILK", "SHEEP": "WOOL", "GOOSE": "EGG"}
 ANIMAL_STRUCTURE = {"COW": "PASTURE", "SHEEP": "PASTURE", "GOOSE": "COOP"}
 ANIMAL_PRODUCTS = ("MILK", "WOOL", "EGG")  # finished products a unit carries to the shed
-ANIMAL_TARGET_SHARE = {"COW": 0.629, "SHEEP": 0.456, "GOOSE": 0.0}  # GOOSE has the
-    # lowest $/day of the three ($50: EGG base 50 / 1-day interval, vs COW's $80 and
-    # SHEEP's $66.7) despite being the cheapest to buy -- 5/5 downloaded top-ladder
-    # replays (3 different players) never place one; see the module docstring's
-    # Animals note. COW/SHEEP MC-searched (scripts/mc_search.py) 2026-08-23, paired with
-    # SHEEP_MAX below (added the same session) -- was 0.60/0.40, hand-picked, never
-    # previously tuned. A first search (not including main_plant_priority in its pool)
-    # found a much lower SHEEP share (0.171) that regressed that specific opponent -13.3pp
-    # when validated at the full pool -- re-searched including it; this value validated
-    # 74.8%->77.4% full pool, main_plant_priority unchanged, only main_price_reactive_
-    # seed_reserve dipped (-6.7pp, 2/30 games) against 3 other opponents improving
-    # (+3.4 to +16.7pp) -- see [[animal-target-share-mc-tuned]] for the full result.
+# Each kind's target share is its own top-level constant (see CROP_TARGET_SHARE's comment above
+# for why) so ANIMAL_TARGET_SHARE below is just an assembled lookup, not the source of truth.
+ANIMAL_TARGET_SHARE_COW = 0.629
+ANIMAL_TARGET_SHARE_SHEEP = 0.456
+ANIMAL_TARGET_SHARE_GOOSE = 0.0  # lowest $/day of the three ($50: EGG base 50 / 1-day interval,
+    # vs COW's $80 and SHEEP's $66.7) despite being the cheapest to buy -- 5/5 downloaded
+    # top-ladder replays (3 different players) never place one; see the module docstring's
+    # Animals note. Kept fixed at 0, not searched -- see [[goose-min-1-regression]] for a direct
+    # test of forcing even 1 GOOSE (catastrophic, confirms this exclusion is correct).
+# COW/SHEEP MC-searched (scripts/mc_search.py) 2026-08-23, paired with SHEEP_MAX below (added the
+# same session) -- was 0.60/0.40, hand-picked, never previously tuned. A first search (not
+# including main_plant_priority in its pool) found a much lower SHEEP share (0.171) that
+# regressed that specific opponent -13.3pp when validated at the full pool -- re-searched
+# including it; this value validated 74.8%->77.4% full pool, main_plant_priority unchanged, only
+# main_price_reactive_seed_reserve dipped (-6.7pp, 2/30 games) against 3 other opponents
+# improving (+3.4 to +16.7pp) -- see [[animal-target-share-mc-tuned]] for the full result.
+ANIMAL_TARGET_SHARE = {
+    "COW": ANIMAL_TARGET_SHARE_COW, "SHEEP": ANIMAL_TARGET_SHARE_SHEEP, "GOOSE": ANIMAL_TARGET_SHARE_GOOSE,
+}
 SHEEP_MAX = 6  # added 2026-08-23, user-flagged: end-of-game replays showed WOOL oversupply
     # (e.g. 7 live SHEEP) tanking its own market price for a net loss -- ANIMAL_TARGET_SHARE
     # alone is a *proportional* split (SHEEP 40% of whatever the overall land-share target
