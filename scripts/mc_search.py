@@ -121,6 +121,16 @@ PARAM_SPACE = {
     # urgent than any at-risk-harvest/at-risk-water tier) and up to 3 (roughly WATER_YIELD_
     # INERT_PRIORITY's own range) to let the search find either direction.
     "WATER_ROUTINE_PRIORITY": ("float", -0.5, 3.0),  # main.py: 1
+    # Added 2026-08-23, user-requested: ANIMAL_TARGET_SHARE {"COW": 0.60, "SHEEP": 0.40} was
+    # hand-picked, never searched. Now paired with SHEEP_MAX=6 (a hard ceiling added the same
+    # session after a real replay showed 7 live SHEEP tanking WOOL's own price), so the
+    # proportional share and the hard cap now interact -- worth re-tuning together rather than
+    # trusting the original hand-picked split still holds. GOOSE stays fixed at 0 (5/5 real
+    # top-ladder replays never build one, see that constant's own comment). Ranges centered on
+    # the current values with headroom both directions, not required to sum to 1 (the ranking
+    # logic only needs relative gaps, doesn't strictly require it).
+    "ANIMAL_TARGET_SHARE_COW": ("float", 0.35, 0.85),  # main.py: 0.60
+    "ANIMAL_TARGET_SHARE_SHEEP": ("float", 0.15, 0.65),  # main.py: 0.40
 }
 
 # WHEAT_SELL_THRESHOLD isn't a top-level `NAME = value` constant -- it's
@@ -128,6 +138,10 @@ PARAM_SPACE = {
 # instead of forcing every constant through the generic top-level pattern.
 _CUSTOM_PATCH_PATTERNS = {
     "WHEAT_SELL_THRESHOLD": re.compile(r'("WHEAT":\s*\{"threshold":\s*)[^}]+(\})'),
+    # Anchored to the ANIMAL_TARGET_SHARE literal specifically (not just any dict with a "COW"/
+    # "SHEEP" key -- ANIMAL_PRODUCT/ANIMAL_STRUCTURE also have those keys, mapped to strings).
+    "ANIMAL_TARGET_SHARE_COW": re.compile(r'(ANIMAL_TARGET_SHARE = \{"COW":\s*)[^,}]+(,)'),
+    "ANIMAL_TARGET_SHARE_SHEEP": re.compile(r'(ANIMAL_TARGET_SHARE = \{"COW":[^,]+, "SHEEP":\s*)[^,}]+(,)'),
 }
 
 

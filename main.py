@@ -475,11 +475,18 @@ ANIMAL_KINDS = ("COW", "SHEEP", "GOOSE")
 ANIMAL_PRODUCT = {"COW": "MILK", "SHEEP": "WOOL", "GOOSE": "EGG"}
 ANIMAL_STRUCTURE = {"COW": "PASTURE", "SHEEP": "PASTURE", "GOOSE": "COOP"}
 ANIMAL_PRODUCTS = ("MILK", "WOOL", "EGG")  # finished products a unit carries to the shed
-ANIMAL_TARGET_SHARE = {"COW": 0.60, "SHEEP": 0.40, "GOOSE": 0.0}  # GOOSE has the
+ANIMAL_TARGET_SHARE = {"COW": 0.629, "SHEEP": 0.456, "GOOSE": 0.0}  # GOOSE has the
     # lowest $/day of the three ($50: EGG base 50 / 1-day interval, vs COW's $80 and
     # SHEEP's $66.7) despite being the cheapest to buy -- 5/5 downloaded top-ladder
     # replays (3 different players) never place one; see the module docstring's
-    # Animals note
+    # Animals note. COW/SHEEP MC-searched (scripts/mc_search.py) 2026-08-23, paired with
+    # SHEEP_MAX below (added the same session) -- was 0.60/0.40, hand-picked, never
+    # previously tuned. A first search (not including main_plant_priority in its pool)
+    # found a much lower SHEEP share (0.171) that regressed that specific opponent -13.3pp
+    # when validated at the full pool -- re-searched including it; this value validated
+    # 74.8%->77.4% full pool, main_plant_priority unchanged, only main_price_reactive_
+    # seed_reserve dipped (-6.7pp, 2/30 games) against 3 other opponents improving
+    # (+3.4 to +16.7pp) -- see [[animal-target-share-mc-tuned]] for the full result.
 SHEEP_MAX = 6  # added 2026-08-23, user-flagged: end-of-game replays showed WOOL oversupply
     # (e.g. 7 live SHEEP) tanking its own market price for a net loss -- ANIMAL_TARGET_SHARE
     # alone is a *proportional* split (SHEEP 40% of whatever the overall land-share target
