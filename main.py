@@ -480,6 +480,13 @@ ANIMAL_TARGET_SHARE = {"COW": 0.60, "SHEEP": 0.40, "GOOSE": 0.0}  # GOOSE has th
     # SHEEP's $66.7) despite being the cheapest to buy -- 5/5 downloaded top-ladder
     # replays (3 different players) never place one; see the module docstring's
     # Animals note
+SHEEP_MAX = 6  # added 2026-08-23, user-flagged: end-of-game replays showed WOOL oversupply
+    # (e.g. 7 live SHEEP) tanking its own market price for a net loss -- ANIMAL_TARGET_SHARE
+    # alone is a *proportional* split (SHEEP 40% of whatever the overall land-share target
+    # happens to be), with no absolute ceiling, so it keeps growing SHEEP count right along with
+    # land/crew size. This hard-caps it regardless of the proportional target -- applied in both
+    # `_build_animal_orders` (stop buying more SHEEP tokens) and `_AnimalPlanner.choose_
+    # structure`/`choose_pickup` (stop building/placing more once live count is at the cap).
 ANIMAL_LAND_SHARE = 0.18  # target fraction of owned tiles reserved for animal
                           # structures -- see the module docstring's Animals note;
                           # top-ladder replays hold this steady around 15-24% throughout
@@ -993,6 +1000,12 @@ class _AnimalPlanner:
             self.empty_structures[ANIMAL_STRUCTURE[k]] > 0 and self.shed.get(k, 0) > 0 for k in ANIMAL_KINDS
         )
 
+    def _at_hard_cap(self, kind):
+        """SHEEP_MAX: a hard ceiling on top of ANIMAL_TARGET_SHARE's proportional split --
+        see that constant's own comment. Only SHEEP has one today; written generically in
+        case another kind ever needs the same treatment."""
+        return kind == "SHEEP" and self.counts["SHEEP"] >= SHEEP_MAX
+
     def choose_structure(self):
         """Pick a kind with no spare (built-but-empty) structure yet, preferring
         whichever affordable, currently-worth-selling kind is furthest below
@@ -1007,6 +1020,7 @@ class _AnimalPlanner:
         needing = [
             k for k in ANIMAL_KINDS
             if ANIMAL_TARGET_SHARE[k] > 0 and self.empty_structures[ANIMAL_STRUCTURE[k]] == 0
+            and not self._at_hard_cap(k)
         ]
         if not needing:
             return None
@@ -1023,6 +1037,7 @@ class _AnimalPlanner:
             if ANIMAL_TARGET_SHARE[k] > 0
             and self.empty_structures[ANIMAL_STRUCTURE[k]] > 0
             and self.shed.get(k, 0) > 0
+            and not self._at_hard_cap(k)
         ]
         if not ready:
             return None
@@ -1913,12 +1928,19 @@ def _build_animal_orders(farm, private, money):
     target = _animal_target(farm)
     committed = sum(shed.get(kind, 0) for kind in ANIMAL_KINDS)
     committed += _live_animal_count(farm)
+    live_sheep = sum(
+        1 for row in farm["tiles"] for tile in row
+        if isinstance(tile, dict) and tile.get("animal") == "SHEEP"
+    )
+    committed_sheep = shed.get("SHEEP", 0) + live_sheep
     remaining = money - SAFETY_RESERVE
     for kind in ANIMAL_KINDS:
         if ANIMAL_TARGET_SHARE[kind] <= 0:
             continue  # e.g. GOOSE -- see ANIMAL_TARGET_SHARE's own comment
         if committed >= target:
             break
+        if kind == "SHEEP" and committed_sheep >= SHEEP_MAX:
+            continue  # SHEEP_MAX -- see that constant's own comment
         if shed.get(kind, 0) >= ANIMAL_RESERVE:
             continue
         cost = ANIMALS[kind]["cost"]

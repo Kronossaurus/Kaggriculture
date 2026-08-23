@@ -1168,6 +1168,41 @@ def test_animal_zone_prefers_tiles_closest_to_shed():
     assert main._dist_to_shed(0, 0, board_size) > 1  # a far corner must lose out
 
 
+def _farm_with_n_live_sheep(n, board_size=10):
+    tiles = [[None for _ in range(board_size)] for _ in range(board_size)]
+    for i in range(n):
+        tiles[0][i] = {"kind": "PASTURE", "animal": "SHEEP"}
+    return {"tiles": tiles, "hands": list(range(15))}  # plenty of hands so target isn't the binding cap
+
+
+def test_animal_planner_choose_structure_respects_sheep_hard_cap():
+    """SHEEP_MAX: ANIMAL_TARGET_SHARE alone is a proportional split with no ceiling, so it grows
+    SHEEP right along with the overall land-share target -- see that constant's own comment
+    (a real replay showed 7 live SHEEP tanking WOOL's own price for a net loss). At the cap,
+    with no spare COW structure either, choose_structure must pick COW, never SHEEP."""
+    farm = _farm_with_n_live_sheep(main.SHEEP_MAX)
+    animal_planner = main._AnimalPlanner(farm, {}, {})
+    animal_planner.target = 20  # override so the overall target isn't what's blocking SHEEP
+    assert animal_planner.choose_structure() == "COW"
+
+
+def test_animal_planner_choose_pickup_respects_sheep_hard_cap():
+    farm = _farm_with_n_live_sheep(main.SHEEP_MAX)
+    farm["tiles"][1][0] = {"kind": "PASTURE"}  # one spare empty PASTURE, ready to receive a token
+    animal_planner = main._AnimalPlanner(farm, {"SHEEP": 1}, {})
+    animal_planner.target = 20
+    assert animal_planner.choose_pickup() is None  # only SHEEP was ready, and it's capped
+
+
+def test_build_animal_orders_stops_buying_sheep_at_the_hard_cap():
+    farm = _farm_with_n_live_sheep(main.SHEEP_MAX)
+    farm["unlocked_quadrants"] = ["NW", "NE", "SW"]  # plenty of land so target isn't the binding cap
+    private = {"shed": {}}
+    orders = main._build_animal_orders(farm, private, money=100000.0)
+    assert not any(o[0] == "BUY_ANIMAL" and o[1] == "SHEEP" for o in orders)
+    assert any(o[0] == "BUY_ANIMAL" and o[1] == "COW" for o in orders)  # COW still unaffected
+
+
 def _all_tests():
     return [(name, fn) for name, fn in sorted(globals().items()) if name.startswith("test_") and callable(fn)]
 
