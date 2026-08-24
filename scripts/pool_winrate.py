@@ -67,6 +67,7 @@ DEFAULT_POOL = [
     "reference/main_mc_tuned_priority_submitted_20260822.py",
     "reference/main_strawberry_ramp_submitted_20260822.py",
     "reference/main_water_priority_submitted_20260823.py",
+    "reference/main_wheat_feed_futile_submitted_20260824.py",
 ]
 
 
