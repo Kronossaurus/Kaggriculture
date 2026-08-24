@@ -128,9 +128,23 @@ PARAM_SPACE = {
     # trusting the original hand-picked split still holds. GOOSE stays fixed at 0 (5/5 real
     # top-ladder replays never build one, see that constant's own comment). Ranges centered on
     # the current values with headroom both directions, not required to sum to 1 (the ranking
-    # logic only needs relative gaps, doesn't strictly require it).
-    "ANIMAL_TARGET_SHARE_COW": ("float", 0.35, 0.85),  # main.py: 0.60
-    "ANIMAL_TARGET_SHARE_SHEEP": ("float", 0.15, 0.65),  # main.py: 0.40
+    # logic only needs relative gaps, doesn't strictly require it). That first joint search
+    # validated COW=0.629/SHEEP=0.456 (main.py, committed) -- annotations below reflect that.
+    "ANIMAL_TARGET_SHARE_COW": ("float", 0.35, 0.85),  # main.py: 0.629
+    # SHEEP's upper bound was 0.65 in the search above -- narrowed here. _AnimalPlanner.
+    # choose_structure() (main.py:1062) balances live COW/SHEEP toward these shares out of a
+    # land-share total of ~14 (3 quadrants x 25 tiles x ANIMAL_LAND_SHARE=0.18); at the COW
+    # value this now centers on (0.629), any SHEEP share above ~0.40 already implies a live
+    # SHEEP count past SHEEP_MAX=6 (main.py:1056 _at_hard_cap), which silently truncates it --
+    # the hard cap and the proportional share then produce the *identical* final SHEEP count,
+    # so trials sampled above ~0.40 mostly differ only in COW/SHEEP build *order*, not outcome,
+    # wasting search budget on a behavioral plateau. Capped at 0.40 so the range stays
+    # informative about the actual (uncapped) split; revisit together with SHEEP_MAX itself
+    # (not currently in this PARAM_SPACE) if a future search wants to explore the cap jointly.
+    "ANIMAL_TARGET_SHARE_SHEEP": ("float", 0.15, 0.40),  # main.py: 0.456 (already above the
+                                                          # new ceiling -- kept as the baseline
+                                                          # value patched from, just outside the
+                                                          # searched range now)
     # Added 2026-08-23, user-requested follow-up to SHEEP_MAX: 5 downloaded top-ladder replays
     # cross-referencing own SHEEP count, opponent SHEEP count, and WOOL shed stockpile against
     # WOOL price found count (own or combined) does NOT predict a price crash -- a game with only
