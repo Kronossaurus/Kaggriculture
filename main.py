@@ -100,6 +100,29 @@ batch below `WHEAT_SHED_RETURN_THRESHOLD` DROPs at the shed once liquidating
 earlier, less careful versions of this exact rule regressed (see the
 ledger).
 
+**`feed_futile` (2026-08-24)**: `_any_unfed_animal`'s gate above is blind to
+*when* the season ends -- on the literal last day, feeding an animal can't
+lead to another sellable production in time (COW's own interval is 2 days,
+SHEEP's is 3, see `ANIMALS`), so holding carried WHEAT "for feed" is pure
+loss with zero offsetting benefit. Found by downloading a real submitted
+ladder replay and tracing it turn-by-turn: 20-35 WHEAT sat carried through
+most of days 27-29, ending with 21 units (plus MILK/STRAWBERRY/FERTILIZER)
+never delivered, alongside ~$980 of never-planted seed reserve the same
+game. `feed_futile` (`days_remaining <= 0`) relaxes `wheat_safe_to_liquidate`
+and `_find_personal_target`'s WHEAT-return threshold on that one day only --
+deliberately narrow, unlike the constants above it that apply across the
+whole `ENDGAME_LIQUIDATION_DAYS` window, to avoid reopening the same
+DROP/PICKUP livelock the 11th/12th attempts hit (see `WHEAT_SHED_RETURN_
+THRESHOLD`'s own comment). It nearly did anyway: the shed-tile WHEAT-PICKUP
+branch had no `liquidating` guard at all, so a unit that DROPped under the
+new rule would immediately re-PICKUP the same units next turn -- caught via
+a replay trace showing one unit alternating DROP/PICKUP the entire last day
+(main.py's PICKUP branch now also requires `not wheat_safe_to_liquidate`).
+Validated at the full-pool 30-seed protocol: 77.4%->80.7%, every opponent
+improved or held, including both reactive sentinels (`main_strawberry_ramp`
++6.7pp, `main_water_priority` +13.3pp, the largest single gain) -- no
+trade-off this time, unlike most prior WHEAT-liquidation attempts.
+
 **Neglected-tile urgency / harvest-ready tiles rotting to weeds**: a tile
 that missed watering once (`consecutive_unwatered >= 1`) scores priority 0.5
 in `_build_tile_jobs`, above routine chores but below at-risk harvest --
@@ -1103,7 +1126,7 @@ class _AnimalPlanner:
 
 def _find_personal_target(
     pos, farm, day, board_size, claimed, inv, animal_planner, shed_tiles,
-    want_fertilizer, shed_wheat_available, liquidating,
+    want_fertilizer, shed_wheat_available, liquidating, feed_futile=False,
 ):
     """The subset of this agent's old single-scan target search that genuinely depends on
     a *specific* unit's own carried inventory -- fertilizer-delivery, feed, animal-token
@@ -1153,14 +1176,22 @@ def _find_personal_target(
     )
     carrying_produce = carried_produce_total > 0
     needs_fertilizer = inv.get("FERTILIZER", 0) == 0 and want_fertilizer and not liquidating
-    needs_wheat = inv.get("WHEAT", 0) <= 0 and _any_unfed_animal(farm) and shed_wheat_available
+    needs_wheat = (
+        inv.get("WHEAT", 0) <= 0 and not feed_futile and _any_unfed_animal(farm) and shed_wheat_available
+    )
     needs_animal_pickup = animal_planner.wants_pickup() and not carries_animal_token
     # A large carried WHEAT batch is worth a dedicated trip too (12th market-order-slot-
     # starvation attempt -- see the module docstring), but deliberately kept out of
     # carried_produce_total/the urgent-priority check above -- see that attempt's note for why
     # (WHEAT's fast, frequent, single-shot harvests trivially cross CARRIED_PRODUCE_URGENT_
-    # THRESHOLD on their own, colliding with weeding every time if counted there).
-    returning_wheat = inv.get("WHEAT", 0) >= WHEAT_SHED_RETURN_THRESHOLD
+    # THRESHOLD on their own, colliding with weeding every time if counted there). That
+    # reasoning is about routine mid-game turns, though -- once `feed_futile` (the literal
+    # last day), any carried WHEAT at all is worth walking back regardless of amount: there's
+    # no more PICKUP/DROP livelock risk to guard against (nothing will PICKUP it again after
+    # today), and the alternative is it simply evaporates uncounted when the season ends.
+    returning_wheat = inv.get("WHEAT", 0) >= WHEAT_SHED_RETURN_THRESHOLD or (
+        feed_futile and inv.get("WHEAT", 0) > 0
+    )
     if carrying_produce or needs_fertilizer or needs_wheat or needs_animal_pickup or returning_wheat:
         if needs_wheat:
             priority = -1
@@ -1345,7 +1376,7 @@ def _build_action(kind):
 
 def _decide_unit(
     pos, inv, farm, private, day, claimed, planner, animal_planner, shed_tiles,
-    want_fertilizer, liquidating, animal_zone,
+    want_fertilizer, liquidating, animal_zone, feed_futile=False,
 ):
     """Resolves a unit's action if it's standing on an actionable tile -- unconditionally
     the best use of this turn (it costs no travel), so nothing else is even considered, same
@@ -1402,7 +1433,7 @@ def _decide_unit(
             claimed.add((fx, fy))
             item, n = next(iter(carried_product.items()))
             return ["PLACE", item, n]
-        wheat_safe_to_liquidate = liquidating and not _any_unfed_animal(farm)
+        wheat_safe_to_liquidate = liquidating and (feed_futile or not _any_unfed_animal(farm))
         carried_produce = {
             k: n for k, n in inv.items()
             if n > 0 and k not in ANIMAL_KINDS
@@ -1426,7 +1457,10 @@ def _decide_unit(
         # walking it to a hungry animal, exactly the mistake `needs_wheat`'s own lack of a
         # `not liquidating` clause was written to avoid -- missing a feed this late still loses
         # the whole animal, a bigger loss than a few unsold units. See the module docstring's
-        # Endgame liquidation (WHEAT) note for the full history.
+        # Endgame liquidation (WHEAT) note for the full history. `feed_futile` (the literal
+        # last day, when even a successful feed can't reach another sellable production --
+        # see `feed_futile`'s own comment in `agent()`) overrides this the same way: an animal
+        # escaping after the game is already over costs nothing.
         if carried_produce:
             claimed.add((fx, fy))
             return ["DROP"]
@@ -1436,7 +1470,15 @@ def _decide_unit(
         ):
             claimed.add((fx, fy))
             return ["PICKUP", "FERTILIZER", 1]
-        if inv.get("WHEAT", 0) <= 0 and private["shed"].get("WHEAT", 0) > 0:
+        if inv.get("WHEAT", 0) <= 0 and private["shed"].get("WHEAT", 0) > 0 and not wheat_safe_to_liquidate:
+            # `not wheat_safe_to_liquidate` closes a DROP<->PICKUP livelock feed_futile
+            # otherwise opens: without it, a unit that just DROPped its carried WHEAT here
+            # (because liquidation decided it's safe to sell instead of hold for feed) would
+            # immediately re-PICKUP the same units right back on its very next turn, since nothing
+            # else stopped it from restocking opportunistic feed WHEAT -- confirmed via a replay
+            # trace showing a unit alternating DROP/PICKUP the entire last day, never once
+            # actually walking away with the WHEAT liquidated. See `wheat_safe_to_liquidate`'s
+            # own comment above.
             claimed.add((fx, fy))
             return ["PICKUP", "WHEAT", min(4, private["shed"]["WHEAT"])]
         if not any(inv.get(k, 0) > 0 for k in ANIMAL_KINDS):
@@ -2023,6 +2065,14 @@ def agent(obs, config=None):
     last_day = max(0, -(-episode_steps // turns_per_day) - 1)  # ceil(steps/turns_per_day) - 1
     days_remaining = last_day - day
     liquidating = days_remaining <= ENDGAME_LIQUIDATION_DAYS
+    # On the literal last day, feeding an animal can no longer lead to another sellable
+    # production before the season ends (COW's own interval is 2 days, SHEEP's is 3 -- see
+    # ANIMALS) -- see the module docstring's Endgame liquidation (WHEAT) note. `_any_unfed_
+    # animal` doesn't know this, so it keeps gating the WHEAT-carry drop/fetch logic below as
+    # if day 29 were no different from day 20, stranding carried WHEAT (confirmed via a real
+    # downloaded ladder replay: 20-35 units sat carried through most of days 27-29, ending
+    # with 21 never delivered) that could have been sold instead.
+    feed_futile = days_remaining <= 0
     last_chance_window = hour >= turns_per_day - LAST_CHANCE_HOURS
 
     market_obs = obs.get("market", {}) or {}
@@ -2069,6 +2119,7 @@ def agent(obs, config=None):
             want_fertilizer,
             liquidating,
             animal_zone,
+            feed_futile,
         )
         if result is None:
             pending.append((i, pos))
@@ -2083,6 +2134,7 @@ def agent(obs, config=None):
                 pos, farm, day, board_size, claimed,
                 inventories[i] if i < len(inventories) else {},
                 animal_planner, shed_tiles, want_fertilizer, shed_wheat_available, liquidating,
+                feed_futile,
             )
             if p is not None:
                 personal[i] = p
