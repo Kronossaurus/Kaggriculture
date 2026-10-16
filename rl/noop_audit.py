@@ -1,46 +1,4 @@
-"""No-op audit: instrument the engine, not the agent.
-
-Kaggriculture's engine silently ignores illegal/invalid actions -- it never
-raises or warns, the unit just spends its turn doing nothing and the game
-moves on (kaggriculture.py's `_apply_unit_action`: "Invalid / illegal actions
-are silent no-ops."). An agent can be throwing away a large share of its
-actions and look completely healthy from every other angle: analyze_actions.py
-can only see *which op was chosen*, never whether the engine actually did
-anything with it -- a policy that calls HARVEST on an empty tile every turn
-looks identical, in that report, to one harvesting real crops.
-
-So this wraps the engine's own `_apply_unit_action` (not our decode_action,
-not the policy's chosen op -- the actual mutation point), snapshots the
-mutable farm + private state either side of each call, and counts calls that
-changed nothing. PASS is tracked separately: a deliberate pass is a real
-choice, not waste, and it would otherwise dominate every count.
-
-Two things this deliberately gets right, worth keeping in mind if this is ever
-extended:
-- Count actions, not intentions. Hooking anything upstream of the engine (e.g.
-  "how many times did the policy try to HARVEST") over-counts: a unit told to
-  harvest a distant tile spends most of its turns walking there and emits
-  MOVE, not HARVEST, so the intended action and the issued action aren't the
-  same thing.
-- This runs the engine live via env.run([agent, opponent]) with both seats
-  real, not against a saved replay with one seat swapped for a placeholder.
-  Replaying with a substituted opponent makes the auditee's own state diverge
-  from what actually happened (money drifts, scripted buys fail, later
-  actions land on tiles that were never bought in the substituted timeline),
-  producing a flood of fake violations that aren't real waste.
-
-Usage:
-    uv run rl/noop_audit.py starter
-    uv run rl/noop_audit.py random
-    uv run rl/noop_audit.py checkpoints/v2/best_model.zip
-    uv run rl/noop_audit.py checkpoints/v2/best_model.zip --opponent starter
-    uv run rl/noop_audit.py checkpoints/v2/best_model.zip --seed 9001 --steps 720
-
-Prints total real (non-PASS) actions issued, how many changed nothing, and a
-per-op breakdown sorted by waste -- the breakdown is the useful part, a single
-percentage says something's wrong, the breakdown says which rule got
-mis-modeled (see rl/README.md for what this tool has found so far).
-"""
+"""No-op audit: instrument the engine, not the agent."""
 
 from __future__ import annotations
 
@@ -60,8 +18,7 @@ from rl.checkpoint import resolve_agent  # noqa: E402
 
 
 def noop_audit(agents, seed: int, episode_steps: int) -> dict[str, list[int]]:
-    """Run one live game, hooking kaggriculture's `_apply_unit_action` to count
-    engine actions that changed nothing. Returns {op_name: [issued, wasted]}."""
+    """Run one live game, hooking kaggriculture's `_apply_unit_action` to count"""
     original = K._apply_unit_action
     stats: dict[str, list[int]] = {}
 
@@ -79,7 +36,7 @@ def noop_audit(agents, seed: int, episode_steps: int) -> dict[str, list[int]]:
     try:
         make("kaggriculture", configuration={"seed": seed, "episodeSteps": episode_steps}, debug=False).run(agents)
     finally:
-        K._apply_unit_action = original  # always restore, even on failure
+        K._apply_unit_action = original
     return stats
 
 

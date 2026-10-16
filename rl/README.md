@@ -154,17 +154,28 @@ uncompensated loss in the shaped reward.
 always unlocks NE, then SW, then SE, at fixed prices ($1k/$2k/$4k) -- so it's
 a plain per-turn toggle, no design ambiguity.
 
-Farm hands, hiring (`HIRE`), and animals are still not in the action space at
-all. Play is confined to a single farmer, though `BUY_LAND` above means it can
-now range across all four quadrants rather than just the starting NW one.
+**Hands / `HIRE`** (added after the note below was first written -- see the
+"Update (hands and HIRE added...)" entry further down for the full design):
+`HIRE` is a plain per-turn toggle, same shape as `BUY_LAND` (`data/README.md`:
+no target, just a cost). Hands themselves went with the *per-hand fixed action
+head* option from the two considered below, not the shared-policy-applied-
+per-unit option -- `MAX_HANDS` (`features.py`) more `MultiDiscrete` dimensions,
+each drawn from the same `FARMER_OPS` vocabulary the farmer uses. Picked
+because it's additive in the action space (`MAX_HANDS` more dimensions, not a
+combinatorial blowup) and needs no change to how `rl/train.py`/SB3 already
+train a single joint policy -- the shared-per-unit option would need a real
+multi-agent-style training loop (variable-cardinality forward passes within
+one env.step(), credit assignment across units sharing one aggregate reward)
+that nothing here was built for. Animals are still not in the action space at
+all (this is the "macro RL + scripted micro" split discussed for the project:
+get the wrapper/encoder/PPO pipeline actually training before growing the
+action space further) -- see rl/CLAUDE.md for the current train/analyze
+workflow this scope needs (short cycles, BC warm-start, checking `model.zip`
+not just `best_model.zip`, etc).
 
-This is the "macro RL + scripted micro" split discussed for the project: get
-the wrapper/encoder/PPO pipeline actually training before growing the action
-space. Remaining natural next steps:
+Remaining natural next step:
 
-1. Farm hands (multiplies actions-per-turn — needs either a per-hand action
-   head or a shared policy applied per-unit).
-2. Animals (coops/pastures, `BUILD_COOP`/`BUILD_PASTURE`,
+1. Animals (coops/pastures, `BUILD_COOP`/`BUILD_PASTURE`,
    `PLACE`/`FEED`/`CARE`/`COLLECT_FERTILIZER`, `BUY_ANIMAL`).
 
 ## Usage
@@ -556,6 +567,35 @@ before `IDLE_PENALTY`, and that even `IDLE_PENALTY` needed real timesteps (not j
 mechanism existing) to turn into an actual preference. Not a failure of the fix, just not yet
 enough data to confirm it helps -- next continued-training round is the actual test.
 
+**Update (hands and HIRE added to the action space, plus a behavioral-cloning
+bootstrap):** two changes landed together. (1) The action space grew from 5 to
+`6 + MAX_HANDS` `MultiDiscrete` dimensions -- a `HIRE` toggle plus one
+per-hand-slot op head, see "Action scope" above for the design and why the
+fixed-slot option won over a shared-policy-per-unit architecture.
+`encode_obs`'s grid gained a `hand-here` channel and `vector` gained a
+`MAX_HANDS`-slot block (position, active flag, held-inventory count,
+near-shed flag per slot) so each slot's head has something to condition on.
+(2) `rl/collect_demonstrations.py` + `rl/pretrain_bc.py` (new): behavioral
+cloning from `kaggle_environments`' own `starter_agent`, added because a from-
+scratch PPO run (`--opponent starter --ent-coef 0.01`, 300k timesteps)
+collapsed completely -- 0.0 bits of action entropy, 100% `HARVEST`, 98.8% of
+which `noop_audit.py` confirmed were no-ops, money never moved off the
+starting $3000. BC (30 demo episodes, 15 epochs, NLL loss 4.25 -> 0.47) fixed
+this: its *stochastic* action distribution matches `starter_agent`'s own
+per-action frequencies closely (its deterministic/argmax eval looks collapsed
+too, but that's just class imbalance in the demo data -- PPO's rollout
+collection samples stochastically, which is what actually matters). Continuing
+PPO from the BC checkpoint did make real progress for one 300k-step round
+(entropy 0.49 -> 1.14 bits, new ops appearing) but then re-collapsed into a
+different degenerate optimum (96.7% `EAST`) over the next round, even at a
+lower `ent_coef=0.005` -- the exact instability class the "training
+instability at ent_coef=0.01" open question below already flagged, now
+confirmed to still bite after a BC warm start. Next concrete hypothesis,
+untested: since BC already solves the exploration problem the entropy bonus
+was meant to help with, try `ent_coef` near 0 for the PPO fine-tuning phase
+specifically, instead of assuming the same bonus that helps cold-start
+exploration is still net-positive once a coherent starting policy exists.
+
 ## Open questions / not yet solved
 
 - **Submission format**: Kaggle's runner loads `main.py` standalone; it's not
@@ -570,17 +610,17 @@ enough data to confirm it helps -- next continued-training round is the actual t
 - **Self-play stability**: `make_opponent` in `train.py` supports pointing at
   a previous checkpoint, but there's no opponent pool/league yet — training
   against a single frozen past self can still cycle/collapse.
-- **Imitation learning from `starter_agent`**: `kaggle_environments`' built-in
-  `starter` opponent (already the default `--opponent`, see
-  `.venv/.../kaggriculture/kaggriculture.py:1041`) is a working scripted
-  buy→plant→water→harvest→sell loop (a "carrot loop"). Just training *against*
-  it doesn't transfer that behavior — PPO never observes the opponent's chosen
-  actions, only the shared environment outcome. Behavioral cloning (record
-  `starter_agent`'s (obs, action) pairs, supervised-pretrain the policy to
-  imitate them, then PPO fine-tune from that checkpoint) would sidestep the
-  exploration/credit-assignment struggle the reward-shaping updates above have
-  been fighting, but hasn't been tried — deliberately deferred in favor of
-  continuing the pure-reward-shaping approach, revisit if that keeps stalling.
+- **Imitation learning from `starter_agent`** — DONE, see the "Update (hands
+  and HIRE added...)" entry above: `rl/collect_demonstrations.py` +
+  `rl/pretrain_bc.py` behavioral-clone `starter_agent`'s carrot loop and it
+  works as intended (fixes the from-scratch collapse), but PPO fine-tuning
+  from that checkpoint still re-collapses within a couple of 300k-step rounds
+  even with a lower `ent_coef` — the exploration/credit-assignment problem
+  this was meant to sidestep turned out to only be half the instability
+  story; the other half is the "training instability at ent_coef=0.01" open
+  question just below, which BC alone doesn't fix. Untested next step: near-0
+  `ent_coef` specifically for the post-BC fine-tuning phase (see that Update
+  entry's last paragraph).
 - **Training instability at `ent_coef=0.01`**: `rollout/ep_rew_mean` oscillates
   strongly (peaks ~-10, valleys ~-230) throughout long continued runs instead of
   converging — see the `NEGLECT_PENALTY` update above. Untried: lower `ent_coef`

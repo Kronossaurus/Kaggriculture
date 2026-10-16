@@ -1,25 +1,4 @@
-"""Summarize one or more Kaggriculture replay JSONs -- win/loss, money, land
-utilization, and quadrant-unlock timeline per side. Works on both local
-replays (`scripts/run_local.py --replay ...`, no team names -- player index
-is used directly) and downloaded Kaggle replays (`kaggle competitions
-replay <episode_id>`, real `TeamNames` -- matched by name so "us" is
-correct regardless of which seat we were assigned).
-
-Grew out of several ad hoc investigations this session (comparing a local
-main.py vs reference/x492_nah_i_d_win.py replay, a batch of 8 real ladder
-episodes from a submission, then a deep dive on one of them plus a
-crop-collapse / animal-share pattern check across the full batch) -- see
-main.py's own docstring's Market-order-slot starvation and Planting
-priority under the gate notes for what those investigations found. Meant
-to be incrementally extended, not a one-off script.
-
-Usage:
-    uv run scripts/analyze_replay.py replays/vs_x492.json
-    uv run scripts/analyze_replay.py replays/latest_submission          # every *.json in a directory
-    uv run scripts/analyze_replay.py replays/latest_submission/*.json --trajectory
-    uv run scripts/analyze_replay.py replays/vs_x492.json --us 0        # local replay, no team names
-    uv run scripts/analyze_replay.py replays/*.json --our-team "Someone Else"
-"""
+"""Summarize one or more Kaggriculture replay JSONs -- win/loss, money, land"""
 
 from __future__ import annotations
 
@@ -30,14 +9,12 @@ from collections import Counter
 from pathlib import Path
 
 DEFAULT_OUR_TEAM = "Victor Carriço"
-TURNS_PER_DAY = 24  # data/README.md default; not stored in the replay itself
-MAX_MARKET_ORDERS = 10  # must match main.py's MAX_MARKET_ORDERS -- the per-turn market-order cap
+TURNS_PER_DAY = 24
+MAX_MARKET_ORDERS = 10
 
 
 def resolve_paths(specs: list[str]) -> list[Path]:
-    """Each spec may be a single file, a directory (every *.json inside,
-    non-recursive), or a glob pattern the shell didn't expand (PowerShell
-    doesn't glob external-command args the way bash does)."""
+    """Each spec may be a single file, a directory (every *.json inside,"""
     paths: list[Path] = []
     for spec in specs:
         p = Path(spec)
@@ -51,9 +28,7 @@ def resolve_paths(specs: list[str]) -> list[Path]:
 
 
 def tile_stats(farm: dict) -> tuple[int, int, Counter]:
-    """(owned, empty, kind_counts) -- owned counts every non-LOCKED tile
-    (including empty ones, which are still owned); kind_counts breaks the
-    non-empty ones down by crop name, WEED, or COOP/PASTURE."""
+    """(owned, empty, kind_counts) -- owned counts every non-LOCKED tile"""
     owned = 0
     empty = 0
     counts: Counter = Counter()
@@ -85,7 +60,7 @@ def identify_us(team_names: list[str] | None, our_team: str, us_override: int | 
     if us_override is not None:
         return us_override
     if not team_names:
-        return 0  # local replay: run_local.py's --p1 (ours, by convention) is always player 0
+        return 0
     for i, name in enumerate(team_names):
         if our_team in name:
             return i
@@ -97,8 +72,6 @@ def quadrant_timeline(steps: list, player_idx: int) -> list[tuple[int, list[str]
     prev: list[str] = []
     n_days = len(steps) // TURNS_PER_DAY
     for day in range(n_days + 1):
-        # Sample late in the day (matches the trajectory table's sample point below) so a
-        # same-day purchase doesn't get misreported a day late.
         idx = min(day * TURNS_PER_DAY + 20, len(steps) - 1)
         obs = steps[idx][0]["observation"]
         uq = obs["farms"][player_idx]["unlocked_quadrants"]
@@ -109,11 +82,7 @@ def quadrant_timeline(steps: list, player_idx: int) -> list[tuple[int, list[str]
 
 
 def classify_order(order: list) -> str:
-    """Maps one submitted market order to one of main.py's 7 order
-    categories. Must branch on (op, resource), not op alone -- BUY_PRODUCT
-    covers both WHEAT (animal feed, main.py:1145) and FERTILIZER
-    (main.py:1118) purchases; classifying on op alone would silently merge
-    feed and fertilizer counts, defeating the point of this breakdown."""
+    """Maps one submitted market order to one of main.py's 7 order"""
     op = order[0]
     if op == "SELL":
         return "sell"
@@ -128,24 +97,11 @@ def classify_order(order: list) -> str:
         return "seed"
     if op == "BUY_ANIMAL":
         return "animal"
-    return "other"  # forward-compatible with any op this breakdown didn't anticipate
+    return "other"
 
 
 def order_occupancy(steps: list, player_idx: int) -> list[dict]:
-    """Per-turn order-type counts from the actually-submitted (already
-    truncated to MAX_MARKET_ORDERS) action.market list. Turn t's decision
-    lives in steps[t+1][player_idx]["action"], not steps[t] -- see
-    scripts/extract_replay_tape.py's t (observation) / t+1 (action) pairing
-    note; getting this backwards silently shifts every number by one turn.
-    Excludes the final step (no following action to read). Note: this can
-    only ever show what actually got submitted after truncation -- the
-    *dropped* pre-truncation orders aren't recoverable from replay JSON
-    alone, since main.py's own market[:MAX_MARKET_ORDERS] truncation
-    (main.py:1272) discards them before the action is ever recorded. The
-    "saturated" flag (submitted count == MAX_MARKET_ORDERS) is only a proxy
-    for "something may have been dropped this turn" -- confirming what was
-    actually dropped requires re-calling main.py's own _build_*_orders
-    functions offline against this same observation data."""
+    """Per-turn order-type counts from the actually-submitted (already"""
     rows = []
     for t in range(len(steps) - 1):
         action = steps[t + 1][player_idx].get("action") or {}
@@ -161,8 +117,7 @@ def order_occupancy(steps: list, player_idx: int) -> list[dict]:
 
 
 def print_order_occupancy(rows: list[dict], n_days: int) -> None:
-    """Day-bucketed mean order count by type + saturation-turn fraction --
-    per-turn granularity for a 719-step replay isn't readable by default."""
+    """Day-bucketed mean order count by type + saturation-turn fraction --"""
     categories = ("sell", "land", "hire", "feed", "seed", "fertilizer", "animal", "other")
     print(f"\n  {'day':>4} " + " ".join(f"{c:>10}" for c in categories) + f" {'saturated':>10}")
     for day in range(n_days):
@@ -176,35 +131,7 @@ def print_order_occupancy(rows: list[dict], n_days: int) -> None:
 
 
 def purchase_trace(steps: list, player_idx: int, resource: str) -> list[dict]:
-    """Per-turn realized-purchase-behavior trace for one shed-tracked
-    resource (a BUY_PRODUCT good, e.g. WHEAT or FERTILIZER -- not a
-    BUY_SEED crop, which lives in a separate private.seeds inventory this
-    mode doesn't track). Operationalizes "realized purchase price,
-    turn-by-turn, old vs new, same replay" (main.py:189-192's specific,
-    previously-unbuilt instrumentation ask) from what a replay actually
-    exposes: shed quantity and market price after each turn resolves, never
-    the engine's internal per-unit fill price directly.
-
-    Same t (observation) / t+1 (action) pairing as order_occupancy above.
-    Per turn: requested_qty (BUY_PRODUCT `resource` orders actually
-    submitted), decision_price/next_price (market price this turn vs. next
-    -- the direct, always-available signal for how far the engine's own
-    price walk moved beyond the static price main.py's affordability check
-    used), acquired_qty (shed delta plus any same-turn SELL of the same
-    resource, so a same-turn sell-then-rebuy doesn't understate what was
-    bought), and implied_avg_price (money delta / acquired_qty) -- computed
-    ONLY on "clean" turns whose action touches no other resource at all, so
-    a mixed turn's noise never gets blended into the estimate silently.
-
-    Known limitation: acquired_qty is a shed-delta, so on a turn where a
-    unit also delivers a harvested `resource` to the shed (e.g. a farmer
-    carrying WHEAT home the same turn feed is bought), acquired_qty
-    over-counts relative to what was actually purchased, understating
-    implied_avg_price. Harvest deliveries aren't part of action.market so
-    this can't be filtered from market-order data alone -- treat
-    implied_avg_price as a plausible lower bound, not an exact figure, on
-    resources that are both grown and purchased (WHEAT is the primary
-    case)."""
+    """Per-turn realized-purchase-behavior trace for one shed-tracked"""
     rows = []
     for t in range(len(steps) - 1):
         obs_t = steps[t][player_idx]["observation"]
@@ -279,9 +206,7 @@ def print_purchase_trace_summary(label: str, trace: list[dict]) -> None:
 
 
 def compare_purchase_traces(traces: list[tuple[str, list[dict]]]) -> None:
-    """Old-vs-new, side by side, never a single blended diff number --
-    matches the anti-blending discipline main.py's own docstring demands
-    for this exact investigation."""
+    """Old-vs-new, side by side, never a single blended diff number --"""
     print("\n  === purchase-trace comparison ===")
     for label, trace in traces:
         print_purchase_trace_summary(label, trace)
@@ -329,7 +254,7 @@ def analyze_one(
               f" | {'money_opp':>9} {'own':>4} {'crop':>5} {'anim':>5} {'weed':>5}")
     n_days = len(steps) // TURNS_PER_DAY
     for day in range(n_days):
-        idx = min(day * TURNS_PER_DAY + 20, len(steps) - 1)  # late in the day, after hiring settles
+        idx = min(day * TURNS_PER_DAY + 20, len(steps) - 1)
         obs = steps[idx][0]["observation"]
         row = {}
         for pi in (us, opp):
@@ -392,9 +317,6 @@ def analyze_one(
 
 
 def main() -> None:
-    # Team names are free-text from real Kaggle accounts and routinely include characters
-    # outside Windows' default console codepage (cp1252) -- e.g. Turkish 'Ş'. Reconfigure
-    # instead of crashing mid-batch on whichever replay happens to hit one.
     for stream in (sys.stdout, sys.stderr):
         if hasattr(stream, "reconfigure"):
             stream.reconfigure(errors="replace")

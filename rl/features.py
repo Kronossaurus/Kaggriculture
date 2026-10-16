@@ -1,12 +1,4 @@
-"""Observation encoding shared by the RL env, the training script, and self-play
-opponents (a frozen SB3 checkpoint acting as the opponent needs the exact same
-encoder the policy trained with).
-
-This is training-time infra, not the submission artifact -- main.py stays a
-plain, dependency-free `agent(obs)` function. A trained policy gets exported to
-something main.py can ship separately, once there's a checkpoint worth
-submitting (see rl/README.md).
-"""
+"""Observation encoding shared by the RL env, the training script, and self-play"""
 
 from __future__ import annotations
 
@@ -14,9 +6,10 @@ import numpy as np
 
 BOARD_SIZE = 10
 
+MAX_HANDS = 6
+
 CROPS = ["WHEAT", "CARROT", "TOMATO", "STRAWBERRY", "MELON"]
 
-# All sellable products, per the Object Types / Price Function tables in data/README.md.
 PRODUCTS = ["WHEAT", "CARROT", "TOMATO", "STRAWBERRY", "MELON", "EGG", "MILK", "WOOL", "FERTILIZER"]
 
 BASE_PRICE = {
@@ -24,28 +17,18 @@ BASE_PRICE = {
     "EGG": 50, "MILK": 160, "WOOL": 200, "FERTILIZER": 100,
 }
 SEED_COST = {"WHEAT": 10, "CARROT": 20, "TOMATO": 50, "STRAWBERRY": 100, "MELON": 80}
-MARKET_I0 = 10_000  # starting inventory every product is calibrated against
+MARKET_I0 = 10_000
 
-# The four tiles PICKUP/DROP require standing on -- confirmed in kaggriculture.py:
-# _shed_access_tiles() -> [(half-1,half-1), (half,half-1), (half-1,half), (half,half)]
-# for half = board_size // 2, and both ops silently no-op via _is_shed_adjacent()
-# before doing anything else if the farmer isn't on one of them. Nothing in the
-# observation flagged this before noop_audit.py found PICKUP/DROP failing ~100% of
-# the time in practice -- see rl/README.md.
 SHED_ADJACENT_TILES = {
     (BOARD_SIZE // 2 - 1, BOARD_SIZE // 2 - 1), (BOARD_SIZE // 2, BOARD_SIZE // 2 - 1),
     (BOARD_SIZE // 2 - 1, BOARD_SIZE // 2), (BOARD_SIZE // 2, BOARD_SIZE // 2),
 }
 
-# Per-tile channels: locked, empty, weed, is_plant, crop one-hot (5), watered_today,
-# yield_units (normalized), fertilized, farmer-is-here.
-# v1 has no BUILD_COOP/BUILD_PASTURE/PLACE ops, so animal structures never appear on
-# a farm we control and get no dedicated channel yet -- see rl/README.md.
-GRID_CHANNELS = 4 + len(CROPS) + 4
+GRID_CHANNELS = 4 + len(CROPS) + 5
 
-# 6 scalars + 1 (near-shed flag) + seed counts + PRODUCTS x{shed, held-in-inventory,
-# market price, market inventory} -- see _encode_vector.
-VECTOR_DIM = 7 + len(CROPS) + len(PRODUCTS) * 4
+HAND_VECTOR_DIM = 5
+
+VECTOR_DIM = 7 + len(CROPS) + len(PRODUCTS) * 4 + MAX_HANDS * HAND_VECTOR_DIM
 
 
 def _encode_farm_grid(farm) -> np.ndarray:
@@ -68,9 +51,10 @@ def _encode_farm_grid(farm) -> np.ndarray:
                     grid[9, y, x] = 1.0 if tile.get("watered_today") else 0.0
                     grid[10, y, x] = min(tile.get("yield_units", 0) / 6.0, 2.0)
                     grid[11, y, x] = 1.0 if tile.get("fertilized_until_day", -1) >= 0 else 0.0
-                # COOP/PASTURE: no channel yet (see module docstring).
+    for hx, hy in farm.get("hands", []):
+        grid[GRID_CHANNELS - 2, hy, hx] = 1.0
     fx, fy = farm["farmer"]
-    grid[12, fy, fx] = 1.0
+    grid[GRID_CHANNELS - 1, fy, fx] = 1.0
     return grid
 
 
@@ -95,10 +79,6 @@ def _encode_vector(obs) -> np.ndarray:
     parts.extend(seeds.get(c, 0) / 10.0 for c in CROPS)
     shed = private["shed"]
     parts.extend(shed.get(p, 0) / 50.0 for p in PRODUCTS)
-    # HARVEST lands produce in the acting unit's personal inventory, not the shed --
-    # it only moves to the shed (and becomes sellable) at end-of-day (see rl/env.py's
-    # _potential docstring). Without this, the policy can't see what it just
-    # harvested until that transfer happens, up to turnsPerDay-1 turns later.
     inventories = private.get("inventories", [])
     inv_totals: dict[str, int] = {}
     for inv in inventories:
@@ -112,18 +92,31 @@ def _encode_vector(obs) -> np.ndarray:
     return np.array(parts, dtype=np.float32)
 
 
-def encode_obs(obs) -> dict[str, np.ndarray]:
-    """Encode a raw Kaggriculture observation into the RL env's Dict observation space.
+def _encode_hands_vector(obs) -> np.ndarray:
+    """Per-hand-slot features for our own hands, MAX_HANDS slots fixed regardless"""
+    player = obs["player"]
+    farm = obs["farms"][player]
+    hands = farm.get("hands", [])
+    inventories = obs["private"].get("inventories", [])
+    parts = []
+    for i in range(MAX_HANDS):
+        if i < len(hands):
+            hx, hy = hands[i]
+            inv = inventories[i + 1] if i + 1 < len(inventories) else {}
+            inv_count = sum(inv.values()) if isinstance(inv, dict) else 0
+            near_shed = 1.0 if (hx, hy) in SHED_ADJACENT_TILES else 0.0
+            parts.extend([hx / BOARD_SIZE, hy / BOARD_SIZE, 1.0, inv_count / 20.0, near_shed])
+        else:
+            parts.extend([0.0, 0.0, 0.0, 0.0, 0.0])
+    return np.array(parts, dtype=np.float32)
 
-    Symmetric in `obs["player"]` -- works whether called for the agent under
-    training (usually player 0) or for a frozen checkpoint acting as the
-    opponent (player 1), since it only ever reads `obs["player"]` to figure out
-    which side is "own" vs "opp".
-    """
+
+def encode_obs(obs) -> dict[str, np.ndarray]:
+    """Encode a raw Kaggriculture observation into the RL env's Dict observation space."""
     player = obs["player"]
     opponent = 1 - player
     return {
         "own_grid": _encode_farm_grid(obs["farms"][player]),
         "opp_grid": _encode_farm_grid(obs["farms"][opponent]),
-        "vector": _encode_vector(obs),
+        "vector": np.concatenate([_encode_vector(obs), _encode_hands_vector(obs)]),
     }

@@ -1,54 +1,4 @@
-"""Train a Kaggriculture PPO agent (v1 action scope -- see rl/README.md).
-
-Usage:
-    uv run rl/train.py                                            # vs starter, 200k steps
-    uv run rl/train.py --opponent random --timesteps 50000        # quick smoke test
-    uv run rl/train.py --n-envs 8 --timesteps 1000000             # parallel rollout collection
-    uv run rl/train.py --opponent checkpoints/v1/model.zip --out checkpoints/v2  # self-play
-    uv run rl/train.py --ent-coef 0.01 --n-envs 8 --timesteps 2000000            # more exploration
-    uv run rl/train.py --resume-from checkpoints/v2/model.zip --out checkpoints/v2 --timesteps 500000  # continue training
-
-Writes the best-eval checkpoint (best_model.zip), the final model (model.zip),
-and reward-normalization stats (vecnormalize.pkl, see below) to --out, plus
-tensorboard logs under runs/.
-
-Performance notes:
-- The bottleneck here is Kaggriculture's own single-threaded Python simulator
-  (env.step()), not the policy network -- a small flattened MLP. `--n-envs`
-  (SubprocVecEnv, one game per CPU process) is the lever that actually
-  matters; it scales rollout collection close to linearly with cores.
-- `--device cuda` is available but unlikely to help *this* policy size/env --
-  GPU transfer overhead on tiny per-step batches tends to wash out any
-  compute win. Kept around for when the policy grows (e.g. a real CNN over
-  the grid observations instead of the current flatten -- see rl/README.md).
-- Self-play (`--opponent <checkpoint>.zip`) combined with `--n-envs > 1` is
-  untested: SubprocVecEnv pickles the opponent closure (which holds a loaded
-  PPO model) into each worker process, which may be slow or fragile. Prefer
-  `--n-envs 1` for self-play runs until this is verified.
-
-Reward normalization (`VecNormalize`, `norm_reward=True`): rl/env.py's reward
-mixes several hand-tuned terms at very different scales -- most events are
-~0.01-1.0, but BUY_LAND is a one-time -10 to -40 hit (see rl/env.py's module
-docstring), a scale mismatch flagged as a training-stability risk but never
-addressed. `VecNormalize` divides the reward by a running estimate of its
-discounted-return std instead of a hand-picked constant, so it adapts as
-training progresses rather than needing the /100 scale (or a BUY_LAND-specific
-fudge factor) to be guessed right upfront. Deliberately `norm_obs=False`:
-features.py's encoder already hand-normalizes every observation field to a
-small range, and reward scale was the specific problem being chased here, not
-observation scale -- changing both at once would make it harder to tell which
-change did what. Reward normalization only affects what the *value function*
-is fit against, not the actions a trained policy outputs, so it's invisible
-to inference: rl/checkpoint.py, rl/play.py, and rl/analyze_actions.py never
-touch reward, only `model.predict(obs)`, and need no changes.
-
-`vecnormalize.pkl` in --out holds the running reward statistics at the end of
-training (matching final `model.zip` more precisely than `best_model.zip`,
-which may have been saved earlier -- EvalCallback doesn't checkpoint
-VecNormalize stats per-eval, only the model). `--resume-from` looks for a
-`vecnormalize.pkl` next to the given checkpoint and resumes those statistics
-too if found; otherwise it starts fresh and says so.
-"""
+"""Train a Kaggriculture PPO agent (v1 action scope -- see rl/README.md)."""
 
 from __future__ import annotations
 
@@ -68,19 +18,11 @@ from stable_baselines3.common.vec_env import DummyVecEnv, SubprocVecEnv, VecNorm
 from rl.checkpoint import resolve_agent  # noqa: E402
 from rl.env import KaggricultureEnv  # noqa: E402
 
-# Must match PPO's own `gamma` (passed explicitly below, not left at SB3's default)
-# and rl/env.py's KaggricultureEnv.GAMMA -- VecNormalize's reward normalization,
-# PPO's advantage estimation, and env.py's potential-based shaping all need to
-# agree on the discount rate for their respective guarantees/behavior to hold.
 GAMMA = 0.99
 
 
 def make_env_fn(opponent, episode_steps: int, seed: int | None):
-    """Factory for a single Monitor-wrapped KaggricultureEnv, picklable so
-    SubprocVecEnv can ship it to worker processes. Monitor sits *inside* the
-    later VecNormalize wrapping (see main()), so it logs true, un-normalized
-    episode returns -- tensorboard's rollout/ep_rew_mean keeps meaning what it
-    always has, regardless of reward normalization."""
+    """Factory for a single Monitor-wrapped KaggricultureEnv, picklable so"""
 
     def _init():
         return Monitor(KaggricultureEnv(opponent=opponent, episode_steps=episode_steps, seed=seed))
@@ -118,9 +60,6 @@ def main() -> None:
     env_fns = [make_env_fn(opponent, args.episode_steps, args.seed) for _ in range(args.n_envs)]
     vec_env_cls = SubprocVecEnv if args.n_envs > 1 else DummyVecEnv
     train_env = vec_env_cls(env_fns)
-    # Always DummyVecEnv (single process): eval doesn't need --n-envs's parallelism
-    # (n_eval_episodes defaults to 5, sequential is fine), just needs to be *some*
-    # VecEnv for VecNormalize to wrap below.
     eval_env = DummyVecEnv([make_env_fn(opponent, args.episode_steps, args.seed)])
 
     out_dir = REPO_ROOT / args.out
@@ -132,8 +71,6 @@ def main() -> None:
         if not resume_path.is_absolute():
             resume_path = REPO_ROOT / resume_path
 
-    # See this file's docstring for why norm_obs=False and why Monitor (inside
-    # train_env/eval_env already) sits underneath this wrapping.
     vecnorm_path = resume_path.parent / "vecnormalize.pkl" if resume_path else None
     if vecnorm_path and vecnorm_path.exists():
         train_env = VecNormalize.load(str(vecnorm_path), train_env)
@@ -142,10 +79,6 @@ def main() -> None:
         if resume_path:
             print(f"No vecnormalize.pkl next to {resume_path} -- starting fresh reward-normalization stats.")
         train_env = VecNormalize(train_env, norm_obs=False, norm_reward=True, gamma=GAMMA)
-    # Frozen (training=False): apply train_env's current stats, don't let eval
-    # episodes update them. EvalCallback calls sync_envs_normalization() each
-    # eval to copy train_env's latest stats here automatically -- no manual
-    # syncing needed.
     eval_env = VecNormalize(eval_env, norm_obs=False, norm_reward=True, gamma=GAMMA, training=False)
 
     if resume_path:
@@ -165,9 +98,6 @@ def main() -> None:
     eval_callback = EvalCallback(
         eval_env,
         best_model_save_path=str(out_dir),
-        # EvalCallback counts calls to _on_step, i.e. one per vectorized step
-        # (n_envs timesteps) -- divide so --eval-freq stays in timestep units
-        # regardless of --n-envs.
         eval_freq=max(args.eval_freq // args.n_envs, 1),
         n_eval_episodes=args.eval_episodes,
     )

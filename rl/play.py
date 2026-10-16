@@ -1,13 +1,4 @@
-"""Run a trained RL checkpoint against an opponent locally -- the RL equivalent
-of scripts/run_local.py, but for an SB3 checkpoint (.zip) instead of a
-main.py-style agent file.
-
-Usage:
-    uv run rl/play.py checkpoints/v1/best_model.zip
-    uv run rl/play.py checkpoints/v1/best_model.zip --opponent random --steps 200
-    uv run rl/play.py checkpoints/v1/best_model.zip --opponent checkpoints/v0/main.py
-    uv run rl/play.py checkpoints/v1/best_model.zip --replay replays/v1_vs_starter.json
-"""
+"""Run a trained RL checkpoint against an opponent locally -- the RL equivalent"""
 
 from __future__ import annotations
 

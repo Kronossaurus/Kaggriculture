@@ -1,11 +1,4 @@
-"""Run a local Kaggriculture episode and optionally dump a replay JSON.
-
-Usage:
-    uv run scripts/run_local.py                          # main.py vs random
-    uv run scripts/run_local.py --p2 starter              # main.py vs starter baseline
-    uv run scripts/run_local.py --p1 random --p2 random   # baseline vs baseline
-    uv run scripts/run_local.py --steps 200 --replay out.json
-"""
+"""Run a local Kaggriculture episode and optionally dump a replay JSON."""
 
 from __future__ import annotations
 
@@ -19,12 +12,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 
 
 def resolve_agent(spec: str) -> str:
-    """Pass through built-in names ("random", "pass", "starter") or a .py path.
-
-    Path is checked relative to the current working directory first, then
-    relative to the repo root, so this works regardless of where the script
-    is invoked from (repo root, scripts/, an IDE run config, etc).
-    """
+    """Pass through built-in names ("random", "pass", "starter") or a .py path."""
     if spec in {"random", "pass", "starter"}:
         return spec
     for base in (Path.cwd(), REPO_ROOT):

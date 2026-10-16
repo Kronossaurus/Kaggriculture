@@ -1,8 +1,4 @@
-// Kaggriculture simulator — a faithful C++ port of kaggriculture.py.
-//
-// Design goals, in order: (1) bit-identical results to the Python interpreter,
-// (2) zero heap allocation per step, (3) trivially copyable state so search can
-// snapshot and fork episodes.
+
 #pragma once
 #include <cmath>
 #include <cstdint>
@@ -13,9 +9,6 @@
 
 namespace kag {
 
-// ---------------------------------------------------------------- item space
-// PRODUCTS order matches kaggriculture.py exactly. The first five products are
-// also the five crops, in CROPS order, so a crop id doubles as a product id.
 enum Item : uint8_t {
     WHEAT = 0, CARROT, TOMATO, STRAWBERRY, MELON, EGG, MILK, WOOL, FERTILIZER,
     GOOSE, COW, SHEEP, N_ITEMS
@@ -27,7 +20,6 @@ inline bool is_crop(uint8_t i) { return i < N_CROPS; }
 inline bool is_product(uint8_t i) { return i < N_PRODUCTS; }
 inline bool is_animal(uint8_t i) { return i >= GOOSE && i < N_ITEMS; }
 
-// ---------------------------------------------------------------- unit ops
 enum Op : uint8_t {
     OP_PASS = 0, OP_NORTH, OP_SOUTH, OP_EAST, OP_WEST,
     OP_PICKUP, OP_DROP, OP_PLACE,
@@ -40,36 +32,35 @@ enum MOp : uint8_t {
     M_NONE = 0, M_HIRE, M_BUY_LAND, M_BUY_SEED, M_BUY_PRODUCT, M_BUY_ANIMAL, M_SELL
 };
 
-// ---------------------------------------------------------------- static data
 struct CropDef { int seed, first_yield_day, max_yield_day, interval, max_yield; bool ongoing; };
 inline constexpr CropDef CROPS[N_CROPS] = {
-    {  10, 2,  4, 0, 6, false },  // WHEAT
-    {  20, 2,  3, 0, 4, false },  // CARROT
-    {  50, 8,  8, 1, 4, true  },  // TOMATO
-    { 100, 10, 10, 2, 4, true },  // STRAWBERRY
-    {  80, 10, 12, 0, 6, false }, // MELON
+    {  10, 2,  4, 0, 6, false },
+    {  20, 2,  3, 0, 4, false },
+    {  50, 8,  8, 1, 4, true  },
+    { 100, 10, 10, 2, 4, true },
+    {  80, 10, 12, 0, 6, false },
 };
 
 enum Structure : uint8_t { ST_COOP = 0, ST_PASTURE = 1 };
 struct AnimalDef { int cost; Structure structure; int first_yield_day, interval, max_held; Item product; };
 inline constexpr AnimalDef ANIMALS[N_ANIMALS] = {
-    { 300, ST_COOP,    4, 1, 4, EGG  },  // GOOSE
-    { 400, ST_PASTURE, 8, 2, 6, MILK },  // COW
-    { 500, ST_PASTURE, 6, 3, 6, WOOL },  // SHEEP
+    { 300, ST_COOP,    4, 1, 4, EGG  },
+    { 400, ST_PASTURE, 8, 2, 6, MILK },
+    { 500, ST_PASTURE, 6, 3, 6, WOOL },
 };
 
 enum Shape : uint8_t { F_LINEAR, F_SQ, F_SQRT, F_LOG, F_LOG10 };
 struct MarketDef { double base; int I0; double T; Shape below_f; double below_t; Shape above_f; double above_t; };
 inline constexpr MarketDef MARKET[N_PRODUCTS] = {
-    {  25, 10000, 400, F_SQRT,   0.80, F_LOG,    0.20 },  // WHEAT
-    {  35, 10000, 450, F_LOG,    0.20, F_SQRT,   0.70 },  // CARROT
-    {  60, 10000, 200, F_LINEAR, 0.40, F_SQRT,   0.60 },  // TOMATO
-    { 120, 10000, 100, F_SQRT,   0.70, F_LINEAR, 1.60 },  // STRAWBERRY
-    { 250, 10000, 300, F_LOG,    0.20, F_SQ,     3.60 },  // MELON
-    {  50, 10000, 332, F_LINEAR, 0.40, F_LOG,    0.20 },  // EGG
-    { 160, 10000, 122, F_SQRT,   0.60, F_LINEAR, 1.60 },  // MILK
-    { 200, 10000, 105, F_LOG,    0.20, F_SQ,     3.20 },  // WOOL
-    { 100, 10000, 200, F_LINEAR, 0.40, F_LINEAR, 0.40 },  // FERTILIZER
+    {  25, 10000, 400, F_SQRT,   0.80, F_LOG,    0.20 },
+    {  35, 10000, 450, F_LOG,    0.20, F_SQRT,   0.70 },
+    {  60, 10000, 200, F_LINEAR, 0.40, F_SQRT,   0.60 },
+    { 120, 10000, 100, F_SQRT,   0.70, F_LINEAR, 1.60 },
+    { 250, 10000, 300, F_LOG,    0.20, F_SQ,     3.60 },
+    {  50, 10000, 332, F_LINEAR, 0.40, F_LOG,    0.20 },
+    { 160, 10000, 122, F_SQRT,   0.60, F_LINEAR, 1.60 },
+    { 200, 10000, 105, F_LOG,    0.20, F_SQ,     3.20 },
+    { 100, 10000, 200, F_LINEAR, 0.40, F_LINEAR, 0.40 },
 };
 
 inline double shape(Shape f, double x) {
@@ -84,7 +75,6 @@ inline double shape(Shape f, double x) {
     return x;
 }
 
-// Amplitudes are derived constants; precompute once.
 struct MarketAmp { double below, above; };
 inline const std::array<MarketAmp, N_PRODUCTS>& market_amps() {
     static const std::array<MarketAmp, N_PRODUCTS> a = [] {
@@ -98,8 +88,6 @@ inline const std::array<MarketAmp, N_PRODUCTS>& market_amps() {
     return a;
 }
 
-// Python: max(PRICE_FLOOR, int(round(price))). Python's round() on a float is
-// round-half-to-even, which is exactly nearbyint's default mode.
 inline int market_price(int item, int inv) {
     const MarketDef& p = MARKET[item];
     const MarketAmp& a = market_amps()[item];
@@ -110,27 +98,24 @@ inline int market_price(int item, int inv) {
     return v < 1 ? 1 : v;
 }
 
-// ---------------------------------------------------------------- shops / town
 enum ShopId : uint8_t {
     SHOP_BAKERY = 0, SHOP_BRUNCH_SPOT, SHOP_FARMERS_MARKET, SHOP_ICE_CREAM_SHOP,
     SHOP_PET_CAFE, SHOP_PIZZA_SHOP, SHOP_SMOOTHIE_SHOP, SHOP_YARN_STORE, N_SHOPS
 };
-// NOTE: this array is in sorted(SHOPS) order, because the environment unlocks
-// with `rng.choice(sorted(SHOPS))`.
+
 inline constexpr uint16_t SHOP_MASK[N_SHOPS] = {
-    (1u << EGG) | (1u << WHEAT),                                        // BAKERY
-    (1u << EGG) | (1u << WHEAT) | (1u << STRAWBERRY),                   // BRUNCH_SPOT
-    (1u << WHEAT) | (1u << CARROT) | (1u << TOMATO) | (1u << STRAWBERRY),// FARMERS_MARKET
-    (1u << STRAWBERRY) | (1u << MILK) | (1u << WHEAT),                  // ICE_CREAM_SHOP
-    (1u << CARROT),                                                     // PET_CAFE
-    (1u << MILK) | (1u << TOMATO) | (1u << WHEAT),                      // PIZZA_SHOP
-    (1u << STRAWBERRY) | (1u << MILK),                                  // SMOOTHIE_SHOP
-    (1u << WOOL),                                                       // YARN_STORE
+    (1u << EGG) | (1u << WHEAT),
+    (1u << EGG) | (1u << WHEAT) | (1u << STRAWBERRY),
+    (1u << WHEAT) | (1u << CARROT) | (1u << TOMATO) | (1u << STRAWBERRY),
+    (1u << STRAWBERRY) | (1u << MILK) | (1u << WHEAT),
+    (1u << CARROT),
+    (1u << MILK) | (1u << TOMATO) | (1u << WHEAT),
+    (1u << STRAWBERRY) | (1u << MILK),
+    (1u << WOOL),
 };
-inline constexpr int SHOP_MULT[N_SHOPS] = { 1, 1, 1, 1, 2, 1, 1, 2 };  // single-product shops pull 2x
+inline constexpr int SHOP_MULT[N_SHOPS] = { 1, 1, 1, 1, 2, 1, 1, 2 };
 constexpr int MAX_SHOP_INSTANCES = 8;
 
-// ---------------------------------------------------------------- config
 struct Config {
     int episode_steps = 720;
     int board_size = 10;
@@ -146,55 +131,48 @@ struct Config {
     uint64_t seed = 0;
 };
 
-// ---------------------------------------------------------------- state
 enum TileKind : uint8_t { T_EMPTY = 0, T_LOCKED, T_WEED, T_COOP, T_PASTURE, T_PLANT };
 
 struct Tile {
     TileKind kind = T_EMPTY;
-    uint8_t  what = 0;          // crop id (PLANT) or animal id (COOP/PASTURE with animal)
+    uint8_t  what = 0;
     bool     has_animal = false;
     bool     watered_today = false;
     bool     fed_today = false;
     bool     cared_today = false;
     bool     fertilizer_available = false;
-    int8_t   consecutive_dry = 0;    // unwatered (plant) / unfed (animal)
+    int8_t   consecutive_dry = 0;
     int8_t   yield_units = 0;
     int8_t   pending_care_bonus = 0;
-    int16_t  planted_day = 0;        // or placed_day
+    int16_t  planted_day = 0;
     int32_t  max_lifespan_step = -1;
     int16_t  fertilized_until_day = -1;
 };
 
-constexpr int MAX_UNITS = 40;   // farmer + hands; hires are Fibonacci-priced so this is ample
+constexpr int MAX_UNITS = 40;
 constexpr int BOARD = 10;
 
 struct Farm {
     double money = 0;
     Tile tiles[BOARD][BOARD];
     int8_t pos_x[MAX_UNITS], pos_y[MAX_UNITS];
-    int n_units = 1;                 // index 0 is the main farmer
-    int n_quadrants = 1;             // NW always unlocked
+    int n_units = 1;
+    int n_quadrants = 1;
     int hires_today = 0;
 
     int16_t shed[N_ITEMS] = {0};
     int shed_total = 0;
     int16_t seeds[N_CROPS] = {0};
     int16_t inv[MAX_UNITS][N_ITEMS] = {{0}};
-    // Per-unit inventories are Python dicts, and several code paths iterate
-    // them in INSERTION order. That order decides which items win the last
-    // slots when the 100-item shed cap binds, so it is load-bearing, not
-    // cosmetic, and must be modelled explicitly.
+
     uint8_t inv_keys[MAX_UNITS][N_ITEMS] = {{0}};
     uint8_t inv_nkeys[MAX_UNITS] = {0};
 
-    // Instrumentation only - never read by the interpreter, so behaviour and
-    // parity are unaffected. `discarded` is the production the 100-item shed
-    // cap silently destroyed, which is otherwise invisible to search.
     int32_t discarded[N_ITEMS] = {0};
     int32_t produced[N_ITEMS] = {0};
     int32_t sold_units[N_ITEMS] = {0};
-    double  sell_revenue = 0;   // coins actually received from SELLs
-    double  total_spend = 0;    // coins actually paid out
+    double  sell_revenue = 0;
+    double  total_spend = 0;
 
     void inv_add(int u, int item, int n) {
         if (n <= 0) return;
@@ -234,25 +212,23 @@ struct State {
     bool done = false;
 };
 
-// ---------------------------------------------------------------- actions
 struct UnitAction { uint8_t op = OP_PASS; uint8_t arg = 0; int16_t n = 1; };
 struct Order { uint8_t op = M_NONE; uint8_t item = 0; int32_t n = 0; };
 
 struct Action {
-    UnitAction units[MAX_UNITS];     // units[0] = farmer
+    UnitAction units[MAX_UNITS];
     int n_units = 1;
     Order orders[16];
     int n_orders = 0;
     void clear() { n_units = 1; units[0] = UnitAction{}; n_orders = 0; }
 };
 
-// ---------------------------------------------------------------- helpers
 inline int quadrant_of(int x, int y, int bs) {
-    // 0=NW 1=NE 2=SW 3=SE
+
     int half = bs / 2;
     return (y < half ? 0 : 2) + (x < half ? 0 : 1);
 }
-// Land is unlocked in the order NE, SW, SE.
+
 inline constexpr int LAND_ORDER[3] = { 1, 2, 3 };
 inline constexpr int LAND_PRICES[3] = { 1000, 2000, 4000 };
 
@@ -298,7 +274,6 @@ public:
 
     double reward(int p) const { return st.farms[p].money; }
 
-    // One environment step, given both players' actions.
     void step(const Action& a0, const Action& a1) {
         if (st.done) return;
         const Action* acts[2] = { &a0, &a1 };
@@ -318,14 +293,10 @@ public:
     }
 
 private:
-    // ------------------------------------------------------------ unit actions
+
     void apply_unit_actions(int p, const Action& a, int day) {
         Farm& f = st.farms[p];
-        // Atomic PLANT validation: if requests for a crop exceed seeds held,
-        // every PLANT of that crop this turn is dropped.
-        // Demand is counted over every submitted unit action, including ones
-        // addressed to hands that do not exist (matching the Python, where the
-        // blocked set is computed before the position lookup no-ops).
+
         int demand[N_CROPS] = {0};
         for (int i = 0; i < a.n_units; ++i)
             if (a.units[i].op == OP_PLANT && a.units[i].arg < N_CROPS) demand[a.units[i].arg]++;
@@ -350,7 +321,7 @@ private:
             case OP_NORTH: case OP_SOUTH: case OP_EAST: case OP_WEST: {
                 int nx = fx + (u.op == OP_EAST) - (u.op == OP_WEST);
                 int ny = fy + (u.op == OP_SOUTH) - (u.op == OP_NORTH);
-                // Movement onto LOCKED tiles is legal (hands can spawn there).
+
                 if (nx < 0 || nx >= bs || ny < 0 || ny >= bs) return;
                 f.pos_x[idx] = static_cast<int8_t>(nx);
                 f.pos_y[idx] = static_cast<int8_t>(ny);
@@ -361,11 +332,9 @@ private:
 
         Tile& tile = f.tiles[fy][fx];
 
-        // Shed ops resolve before the LOCKED guard: three of the four
-        // shed-access tiles start locked, and the shed itself is always owned.
         if (u.op == OP_DROP) {
             if (!is_shed_adjacent(fx, fy, bs)) return;
-            // Insertion order, matching `for item, n in list(inv.items())`.
+
             uint8_t keys[N_ITEMS];
             int nk = f.inv_nkeys[idx];
             for (int k = 0; k < nk; ++k) keys[k] = f.inv_keys[idx][k];
@@ -425,7 +394,7 @@ private:
                 Tile t{};
                 t.kind = T_PLANT; t.what = u.arg;
                 t.planted_day = static_cast<int16_t>(day);
-                t.consecutive_dry = 1;                 // planting day counts as unwatered
+                t.consecutive_dry = 1;
                 t.yield_units = cd.ongoing ? 0 : 1;
                 t.max_lifespan_step = cd.ongoing ? -1
                     : (day + cd.max_yield_day + 1) * cfg.turns_per_day;
@@ -472,7 +441,7 @@ private:
             }
             case OP_DIG: {
                 if (tile.kind == T_EMPTY) return;
-                if (tile.has_animal) return;           // animals are not removable
+                if (tile.has_animal) return;
                 Tile e{}; e.kind = T_EMPTY; tile = e;
                 return;
             }
@@ -503,7 +472,6 @@ private:
         }
     }
 
-    // ------------------------------------------------------------ market
     struct OState { uint8_t type; uint8_t item; int32_t remaining; bool live; };
 
     void process_market(const Action& a0, const Action& a1) {
@@ -525,14 +493,13 @@ private:
                     }
                 }
             }
-            // Atomic orders resolve once, in player order.
+
             for (int p = 0; p < 2; ++p) {
                 if (!os[p].live) continue;
                 if (os[p].type == M_HIRE) { do_hire(st.farms[p]); os[p].live = false; }
                 else if (os[p].type == M_BUY_LAND) { do_buy_land(st.farms[p]); os[p].live = false; }
             }
 
-            // Per-unit lockstep: both players see the same pre-commit inventory.
             for (;;) {
                 struct Q { bool ok = false; uint8_t type = 0; uint8_t item = 0; int price = 0; };
                 Q q[2];
@@ -542,7 +509,7 @@ private:
                     if (t == M_SELL && is_product(it)) {
                         q[p] = { true, t, it, market_price(it, st.market.inventory[it]) };
                     } else if (t == M_BUY_PRODUCT && (it == WHEAT || it == FERTILIZER)) {
-                        // Quoted at post-buy inventory so a round trip nets zero.
+
                         q[p] = { true, t, it, market_price(it, st.market.inventory[it] - 1) };
                     } else if (t == M_BUY_SEED && is_crop(it)) {
                         q[p] = { true, t, it, CROPS[it].seed };
@@ -576,7 +543,7 @@ private:
                 f.money += price;
                 f.sold_units[item] += 1;
                 f.sell_revenue += price;
-                if (price > 1) st.market.inventory[item] += 1;   // $1 sales don't add supply
+                if (price > 1) st.market.inventory[item] += 1;
                 return true;
             case M_BUY_PRODUCT:
                 if (f.money < price) return false;
@@ -609,7 +576,7 @@ private:
         if (f.money < cost || f.n_units >= MAX_UNITS) return;
         f.money -= cost; f.total_spend += cost;
         f.hires_today += 1;
-        // Spawn on the first free shed-access tile (NWSE), ties by occupancy.
+
         int acc[4][2]; shed_access_tiles(cfg.board_size, acc);
         int occ[4] = {0,0,0,0};
         for (int u = 0; u < f.n_units; ++u)
@@ -637,7 +604,6 @@ private:
                     f.tiles[y][x].kind = T_EMPTY;
     }
 
-    // ------------------------------------------------------------ town / decay
     void town_consume(int step_i) {
         if (step_i % cfg.shop_sell_interval == 0) {
             for (int s = 0; s < st.n_shops; ++s) {
@@ -716,7 +682,7 @@ private:
                 Tile& t = f.tiles[y][x];
                 if (!t.has_animal) continue;
                 t.consecutive_dry = t.fed_today ? 0 : static_cast<int8_t>(t.consecutive_dry + 1);
-                if (t.consecutive_dry >= 2) {           // escapes; structure remains
+                if (t.consecutive_dry >= 2) {
                     TileKind k = t.kind;
                     Tile s{}; s.kind = k; t = s;
                     continue;
@@ -743,8 +709,7 @@ private:
     }
 
     void drop_inventories(Farm& f) {
-        // Insertion order again: with the shed near capacity this decides which
-        // goods survive the day and which are discarded.
+
         for (int u = 0; u < f.n_units; ++u) {
             uint8_t keys[N_ITEMS];
             int nk = f.inv_nkeys[u];
@@ -762,4 +727,4 @@ private:
     }
 };
 
-}  // namespace kag
+}
